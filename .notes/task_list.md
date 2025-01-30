@@ -1,20 +1,19 @@
 # Task List
 
 ## High Priority
-- [x] Create comprehensive documentation (**Notes:** Added detailed usage instructions and troubleshooting)
-- [x] Implement core functionality
+- [ ] Add validation and checkpoint saving (**Status:** To Do)
 
 ## Medium Priority
-- [ ] Add batch processing for inference
-- [ ] Optimize memory usage
+- [ ] Add batch processing for inference (**Status:** To Do)
+- [ ] Optimize memory usage during refinement (**Status:** To Do)
 
 ## Low Priority
 - [ ] Add image quality metrics (**Status:** To Do)
 
 ## Completed
-- [x] Project setup and configuration
-- [x] Data utilities implementation
-- [x] LoRA training pipeline
-- [x] Inference & refinement system
-- [x] Error handling and resource management
-- [x] User/developer documentation 
+- [x] Create project structure and documentation
+- [x] Implement core data utilities
+- [x] Implement LoRA training pipeline
+- [x] Implement inference and refinement system
+- [x] Create comprehensive documentation (**Notes:** Full user/developer docs in documentation.md)
+- [x] Basic error handling and resource management 

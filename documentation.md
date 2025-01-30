@@ -10,15 +10,11 @@
 
 ## Environment Setup <a name="environment-setup"></a>
 
-### Google Colab Requirements
-- GPU: A100 or V100 recommended
-- Runtime: Python 3.10+
-- Storage: Minimum 25GB free space in Google Drive
-
-```bash
-# Install required packages
-!pip install -U torch==2.0.1+cu118 torchvision==0.15.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
-!pip install -U diffusers transformers accelerate peft safetensors wandb
+### Google Colab Setup
+```python
+# Run these commands in a Colab cell
+!pip install -q diffusers transformers accelerate safetensors
+!sudo apt -qq install git-lfs
 ```
 
 ### Google Drive Mounting
@@ -31,70 +27,50 @@ drive.mount('/content/drive')
 
 Edit `config.yaml` with these key parameters:
 
-```yaml
-# Required Parameters
-images_dir: "/content/drive/MyDrive/babanne-images"  # Path to training images
-instance_prompt: "a photo of <myspecialstyle>"        # Your custom concept token
+| Parameter | Description | Example Value |
+|-----------|-------------|---------------|
+| `images_dir` | Path to training images | `/content/drive/MyDrive/babanne-images` |
+| `instance_prompt` | Unique concept token prompt | `"a photo of <myspecialstyle>"` |
+| `pretrained_model` | Base SDXL model | `"stabilityai/stable-diffusion-xl-base-1.0"` |
+| `train_batch_size` | Training batch size | `2` |
+| `max_train_steps` | Training iterations | `1000` |
 
-# Training Optimization
-train_batch_size: 2              # Reduce if OOM errors occur
-learning_rate: 1e-4              # Start with 1e-5 for small datasets
-resolution: 512                   # Match your image dimensions
-
-# Inference Parameters
-num_inference_steps: 30          # 20-50 steps recommended
-refiner_strength: 0.3            # 0.2-0.4 for subtle refinements
-```
+**Important:** Keep the `<myspecialstyle>` token in prompts for proper LoRA training.
 
 ## Training <a name="training"></a>
-
-### Preparing Your Dataset
-- Place 200-300 JPG images in your Google Drive folder
-- Images should be square aspect ratio (512x512 recommended)
-- Name images consistently (e.g., `design_001.jpg`, `design_002.jpg`)
 
 ### Starting Training
 ```bash
 python main.py --mode train
 ```
 
-#### Expected Output
-```
-Mounting Google Drive...
-Starting LoRA training...
-Created annotations file at /content/drive/.../annotations.txt
-Training step 100/1000 | Loss: 0.123
-Saving checkpoint to /content/drive/.../lora_output/checkpoint-100
-```
+**Process Flow:**
+1. Mounts Google Drive
+2. Processes images from `images_dir`
+3. Creates annotation files
+4. Trains LoRA adapters
+5. Saves weights to `lora_output_dir`
 
 ## Inference <a name="inference"></a>
 
-### Generating New Designs
+### Generating Images
 ```bash
 python main.py --mode inference
 ```
 
-#### Example Output
-```
-Loading base model with LoRA weights...
-Generating image with prompt: a photo of <myspecialstyle>
-Refining generated image...
-Saved refined image to /content/drive/.../lora_output/refined_output.png
-```
-
-### Custom Prompts (Advanced)
-```python
-# In inference.py modify:
-prompt = "a close-up photo of <myspecialstyle> fabric with floral patterns"
-```
+**Generation Pipeline:**
+1. Loads base SDXL model with LoRA weights
+2. Generates initial image
+3. Refines output with SDXL Refiner
+4. Saves final image to `lora_output_dir/refined_output.png`
 
 ## Troubleshooting <a name="troubleshooting"></a>
 
 ### Common Issues
 
 **CUDA Out of Memory**
-- Reduce `train_batch_size` in config.yaml
-- Add `--mixed_precision fp16` to training command
+- Reduce `train_batch_size` in config
+- Use `resolution: 512` instead of higher values
 
 **Missing Dependencies**
 ```bash
@@ -102,30 +78,31 @@ prompt = "a close-up photo of <myspecialstyle> fabric with floral patterns"
 !pip install --upgrade diffusers transformers accelerate
 ```
 
-**Model Not Loading**
-- Verify Google Drive path in config.yaml
-- Check available storage space
-- Ensure LoRA weights exist in output directory
+**Model Loading Errors**
+- Verify model paths in config
+- Check available disk space on Google Drive
 
 ## Advanced Usage <a name="advanced-usage"></a>
 
-### Multi-Concept Training
+### Custom Prompts
 ```yaml
-# config.yaml
-instance_prompt: "a photo of <myspecialstyle> in <anotherstyle>"
+# In config.yaml
+instance_prompt: "a detailed embroidery pattern of <myspecialstyle> on fabric"
 ```
 
-### Quality Refinement
+### LoRA Parameters
 ```yaml
-# config.yaml
-refiner_steps: 40
-refiner_guidance: 8.5
+# Add to config.yaml for advanced control
+lora_rank: 8       # Higher values increase model flexibility
+lora_alpha: 64     # Scales LoRA contribution
 ```
 
-### Progress Monitoring
-```bash
-# Add to training command
---log_with wandb
+### Multi-GPU Training
+```python
+# Launch with Accelerate
+!accelerate config  # Set up distributed training
+!accelerate launch train.py
 ```
 
-> **Tip:** Use 50-100 inference steps and 0.25-0.35 refiner strength for high-quality outputs 
+### Output Samples
+![Sample Output](https://via.placeholder.com/512x512.png?text=Embroidery+Sample) 
