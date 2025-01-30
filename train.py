@@ -57,27 +57,41 @@ def run(config):
         torch_dtype=torch.float16
     )
     
-    # Setup LoRA configuration
+    # Setup LoRA configuration with correct SDXL target modules
     lora_config = {
         "r": int(config.get("lora_rank", 4)),
         "alpha": float(config.get("lora_alpha", 32)),
-        "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
+        "target_modules": [
+            # Attention modules
+            "to_q",
+            "to_k",
+            "to_v",
+            "to_out.0",
+            # Optional: Cross-attention modules
+            "processor.to_q_lora",
+            "processor.to_k_lora",
+            "processor.to_v_lora",
+            "processor.to_out_lora",
+        ],
     }
+    
+    print(f"Using LoRA config: {lora_config}")
     
     # Try to enable memory efficient attention
     try:
         pipeline.unet.enable_xformers_memory_efficient_attention()
         print("Successfully enabled xformers memory efficient attention")
     except Exception as e:
-        print("Warning: xformers not available. Using default attention. This may increase memory usage.")
-        print("To install xformers, run: pip install xformers")
+        print("Warning: xformers not available. Using default attention.")
     
-    # Enable gradient checkpointing for memory efficiency
+    # Enable gradient checkpointing
     pipeline.unet.enable_gradient_checkpointing()
     
     # Initialize LoRA weights
     print("Initializing LoRA weights...")
     lora_state_dict = {}
+    found_modules = 0
+    
     for name, module in pipeline.unet.named_modules():
         if any(target in name for target in lora_config["target_modules"]):
             try:
@@ -85,9 +99,14 @@ def run(config):
                 if hasattr(module, 'in_features'):
                     in_features = module.in_features
                     out_features = module.out_features
-                else:
+                elif hasattr(module, 'weight'):
                     in_features = module.weight.shape[1]
                     out_features = module.weight.shape[0]
+                else:
+                    print(f"Skipping module {name}: No weight dimensions found")
+                    continue
+                
+                print(f"Adding LoRA to layer: {name} ({in_features} -> {out_features})")
                 
                 # Initialize LoRA weights
                 lora_down = torch.zeros((lora_config["r"], in_features), requires_grad=True)
@@ -100,9 +119,17 @@ def run(config):
                 lora_state_dict[f"{name}.lora_down.weight"] = lora_down
                 lora_state_dict[f"{name}.lora_up.weight"] = lora_up
                 lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"])
+                
+                found_modules += 1
             except Exception as e:
-                print(f"Warning: Skipping layer {name} due to error: {str(e)}")
+                print(f"Warning: Error initializing LoRA for {name}: {str(e)}")
                 continue
+    
+    print(f"Found and initialized {found_modules} modules for LoRA training")
+    
+    # Verify we found modules to train
+    if found_modules == 0:
+        raise ValueError("No suitable attention modules found for LoRA training")
     
     # Configure training parameters
     trainable_params = []
@@ -111,7 +138,9 @@ def run(config):
             trainable_params.append(param)
     
     if not trainable_params:
-        raise ValueError("No trainable parameters found. Check LoRA configuration.")
+        raise ValueError(f"No trainable parameters found. Modules found: {found_modules}")
+    
+    print(f"Number of trainable parameters: {len(trainable_params)}")
     
     optimizer = torch.optim.AdamW(
         trainable_params,

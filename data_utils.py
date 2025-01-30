@@ -13,13 +13,24 @@ def list_images(image_dir: str, extensions: Optional[Set[str]] = None) -> List[s
         Sorted list of image paths
     """
     extensions = extensions or {".jpg", ".jpeg", ".png"}
-    if not Path(image_dir).exists():
-        raise FileNotFoundError(f"Image directory {image_dir} does not exist")
-        
+    
+    # Convert to Path object
+    image_dir = Path(image_dir)
+    if not image_dir.exists():
+        raise FileNotFoundError(f"Image directory does not exist: {image_dir}")
+    
+    # Check if directory is empty
+    if not any(image_dir.iterdir()):
+        raise ValueError(f"Image directory is empty: {image_dir}")
+    
     image_files = []
     for ext in extensions:
-        image_files.extend(Path(image_dir).glob(f"*{ext.lower()}"))
-        image_files.extend(Path(image_dir).glob(f"*{ext.upper()}"))
+        found = list(image_dir.glob(f"*{ext.lower()}")) + list(image_dir.glob(f"*{ext.upper()}"))
+        image_files.extend(found)
+        print(f"Found {len(found)} files with extension {ext}")
+    
+    if not image_files:
+        raise ValueError(f"No images found in {image_dir} with extensions: {extensions}")
     
     return [str(f) for f in sorted(set(image_files))]
 
