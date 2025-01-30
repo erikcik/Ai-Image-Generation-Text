@@ -10,31 +10,52 @@
 
 ## Environment Setup <a name="environment-setup"></a>
 
-### Google Colab Setup (Recommended)
+### Option 1: Google Colab (Recommended)
 1. Open [Google Colab](https://colab.research.google.com)
 2. Create a new notebook
-3. Run these setup commands:
+3. Upload your project files to Google Drive
+4. In a Colab cell, run:
 ```python
-# Install required packages
-!pip install -q diffusers transformers accelerate safetensors
-!sudo apt -qq install git-lfs
-
-# Clone your project (if using git) or upload files manually
-!git clone <your-repository-url>
-
 # Mount Google Drive
 from google.colab import drive
 drive.mount('/content/drive')
+
+# Install dependencies
+!pip install -q diffusers transformers accelerate safetensors
+!sudo apt -qq install git-lfs
+
+# Change to your project directory
+%cd /content/drive/MyDrive/your-project-directory
+
+# Run the script
+!python main.py --mode train  # or inference
 ```
 
-### Local Setup (Alternative)
-If running locally:
+### Option 2: Local Setup
 1. Install dependencies:
 ```bash
 pip install diffusers transformers accelerate safetensors
 ```
-2. Ensure you have sufficient GPU memory (16GB+ recommended)
-3. Update `config.yaml` paths for local directories
+
+2. Create directories:
+```bash
+mkdir -p babanne-images lora_output
+```
+
+3. Update config.yaml:
+```yaml
+drive_mount_path: "./drive"  # This will be ignored in local setup
+images_dir: "./babanne-images"
+lora_output_dir: "./lora_output"
+# ... rest of the config ...
+```
+
+4. Place your training images in the `babanne-images` directory
+
+5. Run the script:
+```bash
+python main.py --mode train  # or inference
+```
 
 ## Configuration <a name="configuration"></a>
 
@@ -81,6 +102,12 @@ python main.py --mode inference
 
 ### Common Issues
 
+**'NoneType' object has no attribute 'kernel' Error**
+- This error occurs when running the script directly instead of in Colab
+- Solution: Either:
+  1. Run in Google Colab (recommended)
+  2. Update config.yaml to use local paths
+  
 **CUDA Out of Memory**
 - Reduce `train_batch_size` in config
 - Use `resolution: 512` instead of higher values
