@@ -35,32 +35,35 @@ class LaceDataset(Dataset):
     def __getitem__(self, idx):
         image = Image.open(self.image_paths[idx]).convert("RGB")
         image = self.transform(image)
-        
-        # Add SDXL-specific time IDs
+
+        # SDXL expects these additional tokens
         original_size = (1024, 1024)
         target_size = (self.size, self.size)
-        crop_coords = (0, 0, self.size, self.size)
+        crops_coords_top_left = (0, 0)
         
         add_time_ids = torch.tensor([
-            original_size[0],  # Original image width
-            original_size[1],  # Original image height
-            target_size[0],    # Target image width
-            target_size[1],    # Target image height
-            crop_coords[0],    # Crop top
-            crop_coords[1],    # Crop left
-            crop_coords[2],    # Crop bottom
-            crop_coords[3],    # Crop right
+            original_size[0],        # Original image width
+            original_size[1],        # Original image height
+            target_size[0],          # Target image width
+            target_size[1],          # Target image height
+            crops_coords_top_left[0],  # Crop top
+            crops_coords_top_left[1],  # Crop left
+            target_size[0],          # Crop bottom
+            target_size[1],          # Crop right
         ])
-        
+
+        # Get text embeddings
+        prompt_ids = self.tokenizer(
+            self.prompts[idx],
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt"
+        ).input_ids[0]
+
         return {
             "pixel_values": image,
-            "input_ids": self.tokenizer(
-                self.prompts[idx],
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt"
-            ).input_ids.squeeze(0),
+            "prompt_ids": prompt_ids,
             "time_ids": add_time_ids
         }
 
@@ -79,14 +82,18 @@ def run(config):
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         config["pretrained_model"],
         torch_dtype=torch.float16
-    )
+    ).to("cuda")
     
     # Freeze base model and add LoRA
-    pipeline.unet.add_lora_weights(
-        lora_rank=config.get("lora_rank", 4),
-        lora_alpha=config.get("lora_alpha", 32)
+    pipeline.unet.enable_gradient_checkpointing()
+    pipeline.vae.enable_slicing()
+    
+    # Add LoRA layers
+    pipeline.unet.add_adapter(
+        adapter_name="lora",
+        rank=config.get("lora_rank", 4),
+        scale=config.get("lora_alpha", 32)
     )
-    pipeline.unet.enable_lora()
     
     # Configure training parameters
     optimizer = torch.optim.AdamW(
@@ -129,27 +136,34 @@ def run(config):
             if global_step >= config["max_train_steps"]:
                 break
                 
+            # Get text embeddings
+            text_embeddings = pipeline.text_encoder(
+                batch["prompt_ids"].to(accelerator.device)
+            )[0]
+            
             # Forward pass
-            latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
+            latents = pipeline.vae.encode(
+                batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
+            ).latent_dist.sample()
             latents = latents * 0.18215
             
+            # Add noise
             noise = torch.randn_like(latents)
             timesteps = torch.randint(
-                0, noise_scheduler.num_train_timesteps, (latents.shape[0],),
-                device=latents.device
+                0, noise_scheduler.config.num_train_timesteps,
+                (latents.shape[0],), device=latents.device
             )
-            
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            encoder_hidden_states = pipeline.text_encoder(batch["input_ids"])[0]
+            # Get time embeddings
+            time_ids = batch["time_ids"].to(accelerator.device)
+            added_cond_kwargs = {"time_ids": time_ids}
             
-            # Add time embeddings required by SDXL
-            added_cond_kwargs = {"time_ids": batch["time_ids"].to(latents.device)}
-            
+            # Predict noise
             noise_pred = pipeline.unet(
                 noisy_latents,
                 timesteps,
-                encoder_hidden_states,
+                text_embeddings,
                 added_cond_kwargs=added_cond_kwargs
             ).sample
             
@@ -170,10 +184,10 @@ def run(config):
             if global_step % config.get("save_steps", 500) == 0:
                 checkpoint_dir = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
                 os.makedirs(checkpoint_dir, exist_ok=True)
-                pipeline.unet.save_lora_weights(checkpoint_dir)
+                pipeline.unet.save_adapter(checkpoint_dir, "lora")
                 print(f"Saved checkpoint to {checkpoint_dir}")
             
     # Save final LoRA weights
     print(f"Saving LoRA weights to {config['lora_output_dir']}")
-    pipeline.unet.save_lora_weights(config["lora_output_dir"])
+    pipeline.unet.save_adapter(config["lora_output_dir"], "lora")
     print("Training completed successfully!") 
