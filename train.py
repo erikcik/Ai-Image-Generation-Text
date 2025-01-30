@@ -184,12 +184,27 @@ def run(config):
         shuffle=True
     )
     
-    # Create optimizer with correct dtype
+    # Add gradient clipping
+    max_grad_norm = 1.0
+    
+    # Create optimizer with correct dtype and gradient clipping
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=float(config["learning_rate"]),
         weight_decay=1e-4,
+        eps=1e-8,  # Add epsilon for numerical stability
     )
+    
+    # Create static projection matrices once
+    if config.get("text_encoder_projection", True):
+        print("Initializing text projection matrices...")
+        with torch.no_grad():
+            main_proj = torch.nn.Linear(768, 2048, bias=False).to(
+                device=accelerator.device, 
+                dtype=torch.float16
+            )
+            # Initialize with small values
+            torch.nn.init.normal_(main_proj.weight, mean=0.0, std=0.02)
     
     # Prepare for training
     pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
@@ -220,134 +235,110 @@ def run(config):
             batch["input_ids"] = batch["input_ids"].to(accelerator.device)
             
             # Forward pass
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                try:
-                    # Debug shapes at each step
-                    print("\nDebug Shapes:")
-                    
-                    # 1. Encode images and check latent shapes
+            try:
+                # Debug shapes at each step
+                print("\nDebug Shapes:")
+                
+                # 1. Encode images
+                with torch.no_grad():
                     latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
                     latents = latents * 0.18215
-                    print(f"Latents shape: {latents.shape}")
-                    
-                    # 2. Add noise
-                    noise = torch.randn_like(latents)
-                    print(f"Noise shape: {noise.shape}")
-                    timesteps = torch.randint(
-                        0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
-                        device=latents.device
-                    )
-                    print(f"Timesteps shape: {timesteps.shape}")
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                    print(f"Noisy latents shape: {noisy_latents.shape}")
-                    
-                    # 3. Get text embeddings with shape checking
-                    print(f"\nInput IDs shape: {batch['input_ids'].shape}")
-                    
-                    # Text encoder 1 (main) - needs to output 2048 dimension
-                    text_encoder_output = pipeline.text_encoder(
+                
+                # 2. Add noise
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
+                    device=latents.device
+                )
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                
+                # 3. Get text embeddings
+                with torch.no_grad():
+                    # Text encoder 1 (main)
+                    prompt_embeds = pipeline.text_encoder(
                         batch["input_ids"],
                         output_hidden_states=True,
                         return_dict=True
-                    )
-                    # Get the penultimate hidden state
-                    prompt_embeds = text_encoder_output.hidden_states[-2]
+                    ).hidden_states[-2]
                     
-                    # Project to correct dimension if needed
+                    # Project main embeddings using the static projection
                     if prompt_embeds.shape[-1] != 2048:
-                        print(f"Projecting prompt embeds from {prompt_embeds.shape[-1]} to 2048")
-                        projection_matrix = torch.randn(
-                            (prompt_embeds.shape[-1], 2048),
-                            device=prompt_embeds.device,
-                            dtype=prompt_embeds.dtype
-                        )
-                        prompt_embeds = prompt_embeds @ projection_matrix
-                    
-                    print(f"Main text embeddings shape: {prompt_embeds.shape}")
+                        prompt_embeds = main_proj(prompt_embeds)
                     
                     # Text encoder 2 (pooled)
-                    text_encoder_2_output = pipeline.text_encoder_2(
+                    pooled_prompt_embeds = pipeline.text_encoder_2(
                         batch["input_ids"],
                         output_hidden_states=True,
                         return_dict=True
-                    )
+                    ).last_hidden_state
                     
-                    # Get the penultimate hidden state
-                    pooled_prompt_embeds = text_encoder_2_output.hidden_states[-2]
-                    
-                    # Average over sequence length dimension if needed
+                    # Mean pool if needed
                     if pooled_prompt_embeds.ndim == 3:
                         pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
-                    
-                    # Ensure pooled embeddings have correct shape
-                    if pooled_prompt_embeds.shape[-1] != 1280:
-                        print(f"Projecting pooled embeds from {pooled_prompt_embeds.shape[-1]} to 1280")
-                        pooled_projection = torch.randn(
-                            (pooled_prompt_embeds.shape[-1], 1280),
-                            device=pooled_prompt_embeds.device,
-                            dtype=pooled_prompt_embeds.dtype
-                        )
-                        pooled_prompt_embeds = pooled_prompt_embeds @ pooled_projection
-                    
-                    print(f"Final pooled embeddings shape: {pooled_prompt_embeds.shape}")
-                    
-                    # 4. Create time embeddings
-                    orig_size = (int(config["resolution"]), int(config["resolution"]))
-                    target_size = (int(config["resolution"]), int(config["resolution"]))
-                    crops_coords_top_left = (0, 0)
-                    
-                    add_time_ids = torch.cat([
-                        torch.tensor(orig_size, device=latents.device, dtype=torch.long),
-                        torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
-                        torch.tensor(target_size, device=latents.device, dtype=torch.long),
-                    ]).unsqueeze(0).repeat(latents.shape[0], 1)
-                    
-                    # 5. Prepare final inputs for UNet
-                    added_cond_kwargs = {
-                        "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-                        "time_ids": add_time_ids.to(dtype=torch.float16)
-                    }
-                    
-                    # Print shapes before UNet
-                    print("\nFinal shapes before UNet:")
-                    print(f"Noisy latents: {noisy_latents.shape}")
-                    print(f"Timesteps: {timesteps.shape}")
-                    print(f"Prompt embeds: {prompt_embeds.shape}")
-                    print(f"Text embeds: {added_cond_kwargs['text_embeds'].shape}")
-                    print(f"Time ids: {added_cond_kwargs['time_ids'].shape}")
-                    
-                    # 6. UNet forward pass
-                    noise_pred = pipeline.unet(
-                        noisy_latents,
-                        timesteps,
-                        prompt_embeds,
-                        added_cond_kwargs=added_cond_kwargs
-                    ).sample
-                    print(f"\nPredicted noise shape: {noise_pred.shape}")
-                    
-                    # 7. Compute loss
-                    loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
-                    print(f"Loss value: {loss.item():.4f}")
-                    
-                except RuntimeError as e:
-                    print("\n=== Error Details ===")
-                    print(f"Error: {str(e)}")
-                    print("\nShape mismatch detected. Common causes:")
-                    print("1. Text encoder output shape mismatch with UNet expectations")
-                    print("2. Incorrect pooling of text embeddings")
-                    print("3. Batch size inconsistency")
-                    print("\nTry adjusting the batch size or resolution in config.yaml")
-                    raise e
-            
-            # Backward pass
-            accelerator.backward(loss)
-            
-            # Log loss
-            if global_step % 10 == 0:
-                print(f"\nStep {global_step}: Loss = {loss.item():.4f}")
-            
-            optimizer.step()
-            optimizer.zero_grad()
+                
+                # 4. Create time embeddings
+                orig_size = (int(config["resolution"]), int(config["resolution"]))
+                target_size = (int(config["resolution"]), int(config["resolution"]))
+                crops_coords_top_left = (0, 0)
+                
+                add_time_ids = torch.cat([
+                    torch.tensor(orig_size, device=latents.device, dtype=torch.long),
+                    torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
+                    torch.tensor(target_size, device=latents.device, dtype=torch.long),
+                ]).unsqueeze(0).repeat(latents.shape[0], 1)
+                
+                # 5. Prepare final inputs for UNet
+                added_cond_kwargs = {
+                    "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
+                    "time_ids": add_time_ids.to(dtype=torch.float16)
+                }
+                
+                # Print shapes before UNet
+                print("\nFinal shapes before UNet:")
+                print(f"Noisy latents: {noisy_latents.shape}")
+                print(f"Timesteps: {timesteps.shape}")
+                print(f"Prompt embeds: {prompt_embeds.shape}")
+                print(f"Text embeds: {added_cond_kwargs['text_embeds'].shape}")
+                print(f"Time ids: {added_cond_kwargs['time_ids'].shape}")
+                
+                # 6. UNet forward pass
+                noise_pred = pipeline.unet(
+                    noisy_latents,
+                    timesteps,
+                    prompt_embeds,
+                    added_cond_kwargs=added_cond_kwargs
+                ).sample
+                print(f"\nPredicted noise shape: {noise_pred.shape}")
+                
+                # 7. Compute loss with scaling
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+                
+                # Check for NaN loss
+                if torch.isnan(loss).any() or torch.isinf(loss).any():
+                    print("\n=== Warning: NaN or Inf loss detected! ===")
+                    print(f"Noise pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
+                    print(f"Target noise stats: min={noise.min()}, max={noise.max()}, mean={noise.mean()}")
+                    # Skip this batch
+                    continue
+                
+                # 8. Backward pass with gradient clipping
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(trainable_params, max_grad_norm)
+                
+                optimizer.step()
+                optimizer.zero_grad()
+                
+                if global_step % config.get("print_frequency", 10) == 0:
+                    print(f"\nStep {global_step}: Loss = {loss.item():.4f}")
+                
+            except RuntimeError as e:
+                print("\n=== Error Details ===")
+                print(f"Error: {str(e)}")
+                print("\nDebug Information:")
+                print(f"Current loss: {loss.item() if 'loss' in locals() else 'Not computed'}")
+                print(f"Gradient norm: {torch.nn.utils.clip_grad_norm_(trainable_params, float('inf'))}")
+                raise e
             
             # Save checkpoint
             if global_step > 0 and global_step % int(config.get("save_steps", 500)) == 0:
