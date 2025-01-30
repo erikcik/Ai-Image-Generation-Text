@@ -10,18 +10,31 @@
 
 ## Environment Setup <a name="environment-setup"></a>
 
-### Google Colab Setup
+### Google Colab Setup (Recommended)
+1. Open [Google Colab](https://colab.research.google.com)
+2. Create a new notebook
+3. Run these setup commands:
 ```python
-# Run these commands in a Colab cell
+# Install required packages
 !pip install -q diffusers transformers accelerate safetensors
 !sudo apt -qq install git-lfs
-```
 
-### Google Drive Mounting
-```python
+# Clone your project (if using git) or upload files manually
+!git clone <your-repository-url>
+
+# Mount Google Drive
 from google.colab import drive
 drive.mount('/content/drive')
 ```
+
+### Local Setup (Alternative)
+If running locally:
+1. Install dependencies:
+```bash
+pip install diffusers transformers accelerate safetensors
+```
+2. Ensure you have sufficient GPU memory (16GB+ recommended)
+3. Update `config.yaml` paths for local directories
 
 ## Configuration <a name="configuration"></a>
 
