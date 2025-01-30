@@ -1,11 +1,13 @@
 import os
 import torch
 from accelerate import Accelerator
-from diffusers import StableDiffusionXLPipeline, DDPMScheduler
+from diffusers import StableDiffusionXLPipeline, DDPMScheduler, UNet2DConditionModel
+from diffusers.loaders import StableDiffusionXLLoraLoaderMixin
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from data_utils import list_images
+from safetensors.torch import save_file
 
 class LaceDataset(Dataset):
     def __init__(self, annotations_file, tokenizer, size=512):
@@ -55,16 +57,45 @@ def run(config):
         torch_dtype=torch.float16
     )
     
-    # Freeze base model and add LoRA
-    pipeline.unet.add_lora_weights(
-        lora_rank=config.get("lora_rank", 4),
-        lora_alpha=config.get("lora_alpha", 32)
-    )
-    pipeline.unet.enable_lora()
+    # Setup LoRA configuration
+    lora_config = {
+        "r": config.get("lora_rank", 4),
+        "alpha": config.get("lora_alpha", 32),
+        "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
+    }
+    
+    # Convert UNet to use LoRA
+    pipeline.unet.enable_xformers_memory_efficient_attention()
+    pipeline.unet.enable_gradient_checkpointing()
+    
+    # Initialize LoRA weights
+    print("Initializing LoRA weights...")
+    lora_state_dict = {}
+    for name, module in pipeline.unet.named_modules():
+        if any(target in name for target in lora_config["target_modules"]):
+            # Initialize LoRA weights for attention layers
+            in_features = module.in_features if hasattr(module, 'in_features') else module.weight.shape[1]
+            out_features = module.out_features if hasattr(module, 'out_features') else module.weight.shape[0]
+            
+            lora_down = torch.zeros((lora_config["r"], in_features), requires_grad=True)
+            lora_up = torch.zeros((out_features, lora_config["r"]), requires_grad=True)
+            
+            # Initialize with small random values
+            torch.nn.init.kaiming_uniform_(lora_down)
+            torch.nn.init.zeros_(lora_up)
+            
+            lora_state_dict[f"{name}.lora_down.weight"] = lora_down
+            lora_state_dict[f"{name}.lora_up.weight"] = lora_up
+            lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"])
     
     # Configure training parameters
+    trainable_params = []
+    for name, param in lora_state_dict.items():
+        if isinstance(param, torch.Tensor) and param.requires_grad:
+            trainable_params.append(param)
+    
     optimizer = torch.optim.AdamW(
-        pipeline.unet.parameters(),
+        trainable_params,
         lr=config["learning_rate"],
         weight_decay=1e-4
     )
@@ -75,7 +106,7 @@ def run(config):
         beta_end=0.02
     )
     
-    # Prepare dataset
+    # Prepare dataset and dataloader
     dataset = LaceDataset(
         os.path.join(config["images_dir"], "annotations.txt"),
         tokenizer=pipeline.tokenizer,
@@ -88,7 +119,7 @@ def run(config):
         shuffle=True
     )
     
-    # Prepare components with accelerator
+    # Prepare for training
     pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
         pipeline.unet, optimizer, train_dataloader
     )
@@ -131,13 +162,17 @@ def run(config):
             optimizer.step()
             optimizer.zero_grad()
             
-            # Update progress
+            # Save checkpoint periodically
+            if global_step > 0 and global_step % config.get("save_steps", 500) == 0:
+                print(f"\nSaving checkpoint at step {global_step}")
+                save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
+                os.makedirs(save_path, exist_ok=True)
+                save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+            
             progress_bar.update(1)
             global_step += 1
-            
-            # TODO: Add logging and checkpoint saving
-            
+    
     # Save final LoRA weights
-    print(f"Saving LoRA weights to {config['lora_output_dir']}")
-    pipeline.unet.save_lora_weights(config["lora_output_dir"])
+    print(f"Saving final LoRA weights to {config['lora_output_dir']}")
+    save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
     print("Training completed successfully!") 

@@ -14,4 +14,11 @@ guidance_scale: 7.5
 refiner_steps: 20
 refiner_strength: 0.3
 refiner_guidance: 7.5
-output_format: "png" 
+output_format: "png"
+
+# LoRA specific parameters
+lora_rank: 4
+lora_alpha: 32
+save_steps: 500
+num_epochs: 100
+use_wandb: false  # Set to true if using Weights & Biases logging 
