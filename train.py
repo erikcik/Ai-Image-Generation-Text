@@ -59,8 +59,8 @@ def run(config):
     
     # Setup LoRA configuration
     lora_config = {
-        "r": config.get("lora_rank", 4),
-        "alpha": config.get("lora_alpha", 32),
+        "r": int(config.get("lora_rank", 4)),
+        "alpha": float(config.get("lora_alpha", 32)),
         "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
     }
     
@@ -80,20 +80,29 @@ def run(config):
     lora_state_dict = {}
     for name, module in pipeline.unet.named_modules():
         if any(target in name for target in lora_config["target_modules"]):
-            # Initialize LoRA weights for attention layers
-            in_features = module.in_features if hasattr(module, 'in_features') else module.weight.shape[1]
-            out_features = module.out_features if hasattr(module, 'out_features') else module.weight.shape[0]
-            
-            lora_down = torch.zeros((lora_config["r"], in_features), requires_grad=True)
-            lora_up = torch.zeros((out_features, lora_config["r"]), requires_grad=True)
-            
-            # Initialize with small random values
-            torch.nn.init.kaiming_uniform_(lora_down)
-            torch.nn.init.zeros_(lora_up)
-            
-            lora_state_dict[f"{name}.lora_down.weight"] = lora_down
-            lora_state_dict[f"{name}.lora_up.weight"] = lora_up
-            lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"])
+            try:
+                # Get input and output features
+                if hasattr(module, 'in_features'):
+                    in_features = module.in_features
+                    out_features = module.out_features
+                else:
+                    in_features = module.weight.shape[1]
+                    out_features = module.weight.shape[0]
+                
+                # Initialize LoRA weights
+                lora_down = torch.zeros((lora_config["r"], in_features), requires_grad=True)
+                lora_up = torch.zeros((out_features, lora_config["r"]), requires_grad=True)
+                
+                # Initialize with small random values
+                torch.nn.init.kaiming_uniform_(lora_down)
+                torch.nn.init.zeros_(lora_up)
+                
+                lora_state_dict[f"{name}.lora_down.weight"] = lora_down
+                lora_state_dict[f"{name}.lora_up.weight"] = lora_up
+                lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"])
+            except Exception as e:
+                print(f"Warning: Skipping layer {name} due to error: {str(e)}")
+                continue
     
     # Configure training parameters
     trainable_params = []
@@ -101,9 +110,12 @@ def run(config):
         if isinstance(param, torch.Tensor) and param.requires_grad:
             trainable_params.append(param)
     
+    if not trainable_params:
+        raise ValueError("No trainable parameters found. Check LoRA configuration.")
+    
     optimizer = torch.optim.AdamW(
         trainable_params,
-        lr=config["learning_rate"],
+        lr=float(config["learning_rate"]),
         weight_decay=1e-4
     )
     
@@ -117,12 +129,12 @@ def run(config):
     dataset = LaceDataset(
         os.path.join(config["images_dir"], "annotations.txt"),
         tokenizer=pipeline.tokenizer,
-        size=config["resolution"]
+        size=int(config["resolution"])
     )
     
     train_dataloader = DataLoader(
         dataset,
-        batch_size=config["train_batch_size"],
+        batch_size=int(config["train_batch_size"]),
         shuffle=True
     )
     
@@ -132,13 +144,13 @@ def run(config):
     )
     
     # Training loop
-    progress_bar = tqdm(range(config["max_train_steps"]))
+    progress_bar = tqdm(range(int(config["max_train_steps"])))
     global_step = 0
     
     pipeline.unet.train()
-    for epoch in range(config.get("num_epochs", 1)):
+    for epoch in range(int(config.get("num_epochs", 1))):
         for batch in train_dataloader:
-            if global_step >= config["max_train_steps"]:
+            if global_step >= int(config["max_train_steps"]):
                 break
                 
             # Forward pass
@@ -170,7 +182,7 @@ def run(config):
             optimizer.zero_grad()
             
             # Save checkpoint periodically
-            if global_step > 0 and global_step % config.get("save_steps", 500) == 0:
+            if global_step > 0 and global_step % int(config.get("save_steps", 500)) == 0:
                 print(f"\nSaving checkpoint at step {global_step}")
                 save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
                 os.makedirs(save_path, exist_ok=True)
