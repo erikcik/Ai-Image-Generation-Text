@@ -1,0 +1,82 @@
+{
+  "rules": {
+    "context_initialization": {
+      "description": "Starting point for each interaction, ensuring thorough understanding of project requirements and references",
+      "steps": [
+        "ALWAYS read `.notes/project_overview.md` and `.notes/task_list.md` before beginning any coding or documentation task",
+        "ALWAYS confirm that you are operating under the guidelines specified for deep learning, diffusion models, and LLM development"
+      ]
+    },
+    "operational_protocol": {
+      "description": "How to approach tasks and maintain code quality",
+      "before_action": [
+        "Create a MECE (Mutually Exclusive, Collectively Exhaustive) task breakdown for clarity and efficient problem solving"
+      ],
+      "code_changes": [
+        "Read relevant code sections before editing to preserve existing functionality",
+        "Maintain type safety and best practices",
+        "Ensure code is written according to PEP 8 style guidelines",
+        "Implement GPU/mixed-precision optimizations when possible"
+      ]
+    },
+    "ai_capabilities": {
+      "description": "Expert AI skill set relevant to project",
+      "capabilities": [
+        "Extensive knowledge of deep learning with PyTorch",
+        "Expertise in Transformers library for LLM and advanced token handling",
+        "Skilled in Diffusers library for Stable Diffusion models",
+        "Proficient in LoRA (Low-Rank Adaptation) fine-tuning techniques",
+        "Adept at mixed precision training (torch.cuda.amp)",
+        "Proficient at implementing attention mechanisms, positional encodings, and advanced text/image pipelines",
+        "Ability to create object-oriented model architectures and functional data pipelines"
+      ]
+    },
+    "project_technologies": {
+      "description": "Technologies and libraries used in this project",
+      "tech_stack": [
+        "PyTorch",
+        "Transformers",
+        "Diffusers",
+        "Accelerate",
+        "LoRA fine-tuning",
+        "StabilityAI Stable Diffusion XL Base 1.0",
+        "StabilityAI Stable Diffusion XL Refiner 1.0",
+        "Numpy",
+        "TQDM",
+        "TensorBoard or Weights & Biases for logging",
+        "Python 3.9+"
+      ]
+    },
+    "task_integration_and_debugging": {
+      "description": "Ensure all changes are documented in directory structure, task list, and debug logs",
+      "directives": [
+        "After making any change, update the directory structure if necessary and reflect these changes in `.notes/task_list.md`",
+        "Insert short, concise print statements for debugging at critical steps in scripts (e.g., 'Loading config...', 'Starting training...', 'Saving checkpoint...')",
+        "Document every AI interaction thoroughly in `.notes/meeting_notes.md: Documentation of AI interactions.` with detailed explanations of prompts, responses, and decisions"
+      ]
+    },
+    "safety_requirements": [
+      "NEVER break type safety",
+      "ALWAYS maintain proper error handling and logging mechanisms",
+      "ALWAYS document new code, including docstrings and inline comments"
+    ],
+    "priorities": [
+      {
+        "source": ".notes/",
+        "weight": 1.0
+      }
+    ],
+    "modes": {
+      "base": {
+        "description": "For routine tasks that require standard deep learning development"
+      },
+      "enhanced": {
+        "description": "For advanced tasks, such as multi-GPU distributed training or complex debugging scenarios"
+      }
+    },
+    "project_directives": {
+      "name": "my_project",
+      "ai_first": true
+    }
+  }
+}

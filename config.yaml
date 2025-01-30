@@ -1,0 +1,17 @@
+drive_mount_path: "/content/drive"
+images_dir: "/content/drive/MyDrive/babanne-images"
+lora_output_dir: "/content/drive/MyDrive/lora_output"
+instance_prompt: "a photo of <myspecialstyle>"
+class_prompt: "a photo of a painting"
+pretrained_model: "stabilityai/stable-diffusion-xl-base-1.0"
+refiner_model: "stabilityai/stable-diffusion-xl-refiner-1.0"
+resolution: 512
+train_batch_size: 2
+learning_rate: 1e-4
+max_train_steps: 1000
+num_inference_steps: 30
+guidance_scale: 7.5
+refiner_steps: 20
+refiner_strength: 0.3
+refiner_guidance: 7.5
+output_format: "png" 

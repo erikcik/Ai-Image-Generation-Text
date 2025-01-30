@@ -1,0 +1,14 @@
+make sure to first use the deepseek for the whole document generationg and for debugging use claude 
+use cursorrules and cursorignore properly and insert boilerplate at the start of the composer stating that you are expert. this can also be insterted as notepad
+in this initial boilerplate also make sure it adds the changes it made to the .notes folder use the starter template
+    .notes/: Project documentation and AI interaction logs
+        project_overview.md: Project details and specifications
+        task_list.md: Current and planned development tasks
+        meeting_notes.md: Documentation of AI interactions
+        directory_structure.md: Project structure guidelines
+
+make sure that .notes is updated accordingly with the initial boilerplate code and (this is important) composer saves its changes made for keeping track of its change to my codebase in task_list
+try to use composer checkpoints for every revertable change you want to make because it saves your code in that chat.
+maybe shorter composer sessions
+make ai debug as much as possible with its proper messages
+
