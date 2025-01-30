@@ -71,24 +71,23 @@ def run(config):
     print(f"Loading base model: {config['pretrained_model']}")
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         config["pretrained_model"],
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,  # Ensure float16 for all components
+        variant="fp16",
+        use_safetensors=True
     )
     
-    # Setup LoRA configuration with correct SDXL target modules
+    # Move all pipeline components to float16
+    pipeline.to(torch.float16)
+    
+    # Setup LoRA configuration
     lora_config = {
         "r": int(config.get("lora_rank", 4)),
         "alpha": float(config.get("lora_alpha", 32)),
         "target_modules": [
-            # Attention modules
             "to_q",
             "to_k",
             "to_v",
             "to_out.0",
-            # Optional: Cross-attention modules
-            "processor.to_q_lora",
-            "processor.to_k_lora",
-            "processor.to_v_lora",
-            "processor.to_out_lora",
         ],
     }
     
@@ -112,7 +111,6 @@ def run(config):
     for name, module in pipeline.unet.named_modules():
         if any(target in name for target in lora_config["target_modules"]):
             try:
-                # Get input and output features
                 if hasattr(module, 'in_features'):
                     in_features = module.in_features
                     out_features = module.out_features
@@ -120,14 +118,17 @@ def run(config):
                     in_features = module.weight.shape[1]
                     out_features = module.weight.shape[0]
                 else:
-                    print(f"Skipping module {name}: No weight dimensions found")
                     continue
                 
                 print(f"Adding LoRA to layer: {name} ({in_features} -> {out_features})")
                 
-                # Initialize LoRA weights
-                lora_down = torch.zeros((lora_config["r"], in_features), requires_grad=True)
-                lora_up = torch.zeros((out_features, lora_config["r"]), requires_grad=True)
+                # Initialize LoRA weights in float16
+                lora_down = torch.zeros((lora_config["r"], in_features), 
+                                     dtype=torch.float16, 
+                                     requires_grad=True)
+                lora_up = torch.zeros((out_features, lora_config["r"]), 
+                                    dtype=torch.float16,
+                                    requires_grad=True)
                 
                 # Initialize with small random values
                 torch.nn.init.kaiming_uniform_(lora_down)
@@ -135,7 +136,8 @@ def run(config):
                 
                 lora_state_dict[f"{name}.lora_down.weight"] = lora_down
                 lora_state_dict[f"{name}.lora_up.weight"] = lora_up
-                lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"])
+                lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"], 
+                                                              dtype=torch.float16)
                 
                 found_modules += 1
             except Exception as e:
@@ -144,7 +146,6 @@ def run(config):
     
     print(f"Found and initialized {found_modules} modules for LoRA training")
     
-    # Verify we found modules to train
     if found_modules == 0:
         raise ValueError("No suitable attention modules found for LoRA training")
     
@@ -159,7 +160,7 @@ def run(config):
     
     print(f"Number of trainable parameters: {len(trainable_params)}")
     
-    # Initialize dataset directly (no annotations file needed)
+    # Initialize dataset
     dataset = LaceDataset(
         image_dir=config["images_dir"],
         instance_prompt=config["instance_prompt"],
@@ -175,16 +176,21 @@ def run(config):
         shuffle=True
     )
     
+    # Create optimizer with correct dtype
     optimizer = torch.optim.AdamW(
         trainable_params,
         lr=float(config["learning_rate"]),
-        weight_decay=1e-4
+        weight_decay=1e-4,
     )
     
     # Prepare for training
     pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
         pipeline.unet, optimizer, train_dataloader
     )
+    
+    # Move VAE and text encoder to GPU and float16
+    pipeline.vae = pipeline.vae.to(accelerator.device, dtype=torch.float16)
+    pipeline.text_encoder = pipeline.text_encoder.to(accelerator.device, dtype=torch.float16)
     
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=1000,
@@ -202,35 +208,39 @@ def run(config):
             if global_step >= int(config["max_train_steps"]):
                 break
                 
+            # Move batch to GPU and convert to float16
+            batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
+            batch["input_ids"] = batch["input_ids"].to(accelerator.device)
+            
             # Forward pass
-            latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
-            latents = latents * 0.18215
-            
-            noise = torch.randn_like(latents)
-            timesteps = torch.randint(
-                0, noise_scheduler.num_train_timesteps, (latents.shape[0],),
-                device=latents.device
-            )
-            
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-            
-            encoder_hidden_states = pipeline.text_encoder(batch["input_ids"])[0]
-            
-            noise_pred = pipeline.unet(
-                noisy_latents,
-                timesteps,
-                encoder_hidden_states
-            ).sample
-            
-            # Compute loss
-            loss = torch.nn.functional.mse_loss(noise_pred, noise)
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
+                latents = latents * 0.18215
+                
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(
+                    0, noise_scheduler.num_train_timesteps, (latents.shape[0],),
+                    device=latents.device
+                )
+                
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                
+                encoder_hidden_states = pipeline.text_encoder(batch["input_ids"])[0]
+                
+                noise_pred = pipeline.unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states
+                ).sample
+                
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
             
             # Backward pass
             accelerator.backward(loss)
             optimizer.step()
             optimizer.zero_grad()
             
-            # Save checkpoint periodically
+            # Save checkpoint
             if global_step > 0 and global_step % int(config.get("save_steps", 500)) == 0:
                 print(f"\nSaving checkpoint at step {global_step}")
                 save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
@@ -240,7 +250,7 @@ def run(config):
             progress_bar.update(1)
             global_step += 1
     
-    # Save final LoRA weights
+    # Save final weights
     print(f"Saving final LoRA weights to {config['lora_output_dir']}")
     save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
     print("Training completed successfully!") 
