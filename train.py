@@ -221,74 +221,103 @@ def run(config):
             
             # Forward pass
             with torch.autocast(device_type='cuda', dtype=torch.float16):
-                # Encode images
-                latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
-                latents = latents * 0.18215
-                
-                # Add noise
-                noise = torch.randn_like(latents)
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
-                    device=latents.device
-                )
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                
-                # Get text embeddings for SDXL
-                # Text encoder 1 (main)
-                prompt_embeds = pipeline.text_encoder(
-                    batch["input_ids"],
-                    output_hidden_states=True,
-                    return_dict=True
-                ).hidden_states[-2]
-                
-                # Text encoder 2 (pooled)
-                pooled_output = pipeline.text_encoder_2(
-                    batch["input_ids"],
-                    output_hidden_states=True,
-                    return_dict=True
-                )
-                pooled_prompt_embeds = pooled_output.hidden_states[-2]
-                
-                # Get the final hidden state from text_encoder_2
-                text_encoder_2_output = pooled_output.last_hidden_state
-                
-                # Handle the pooled embeddings shape
-                if text_encoder_2_output.ndim == 3:
-                    pooled_prompt_embeds = text_encoder_2_output.mean(dim=1)
-                else:
-                    pooled_prompt_embeds = text_encoder_2_output
-                
-                # Ensure shapes are correct
-                if prompt_embeds.ndim == 2:
-                    prompt_embeds = prompt_embeds.unsqueeze(0)
-                
-                # Create time embeddings with correct shape
-                orig_size = (int(config["resolution"]), int(config["resolution"]))
-                target_size = (int(config["resolution"]), int(config["resolution"]))
-                crops_coords_top_left = (0, 0)
-                
-                add_time_ids = torch.cat([
-                    torch.tensor(orig_size, device=latents.device, dtype=torch.long),
-                    torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
-                    torch.tensor(target_size, device=latents.device, dtype=torch.long),
-                ]).unsqueeze(0).repeat(latents.shape[0], 1)
-                
-                # Prepare added conditions with correct shapes
-                added_cond_kwargs = {
-                    "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-                    "time_ids": add_time_ids.to(dtype=torch.float16)
-                }
-                
-                # Predict noise
-                noise_pred = pipeline.unet(
-                    noisy_latents,
-                    timesteps,
-                    prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs
-                ).sample
-                
-                # Compute loss
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
+                try:
+                    # Debug shapes at each step
+                    print("\nDebug Shapes:")
+                    
+                    # 1. Encode images and check latent shapes
+                    latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
+                    latents = latents * 0.18215
+                    print(f"Latents shape: {latents.shape}")
+                    
+                    # 2. Add noise
+                    noise = torch.randn_like(latents)
+                    print(f"Noise shape: {noise.shape}")
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
+                        device=latents.device
+                    )
+                    print(f"Timesteps shape: {timesteps.shape}")
+                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                    print(f"Noisy latents shape: {noisy_latents.shape}")
+                    
+                    # 3. Get text embeddings with shape checking
+                    print(f"\nInput IDs shape: {batch['input_ids'].shape}")
+                    
+                    # Text encoder 1 (main)
+                    text_encoder_output = pipeline.text_encoder(
+                        batch["input_ids"],
+                        output_hidden_states=True,
+                        return_dict=True
+                    )
+                    prompt_embeds = text_encoder_output.hidden_states[-2]
+                    print(f"Main text embeddings shape: {prompt_embeds.shape}")
+                    
+                    # Text encoder 2 (pooled)
+                    text_encoder_2_output = pipeline.text_encoder_2(
+                        batch["input_ids"],
+                        output_hidden_states=True,
+                        return_dict=True
+                    )
+                    
+                    # Get both hidden states and pooled output
+                    pooled_prompt_embeds = text_encoder_2_output.hidden_states[-2]
+                    print(f"Initial pooled embeddings shape: {pooled_prompt_embeds.shape}")
+                    
+                    # Reshape pooled embeddings correctly for SDXL
+                    if pooled_prompt_embeds.ndim == 3:
+                        # Average over sequence length dimension
+                        pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
+                    print(f"Final pooled embeddings shape: {pooled_prompt_embeds.shape}")
+                    
+                    # 4. Create time embeddings
+                    orig_size = (int(config["resolution"]), int(config["resolution"]))
+                    target_size = (int(config["resolution"]), int(config["resolution"]))
+                    crops_coords_top_left = (0, 0)
+                    
+                    add_time_ids = torch.cat([
+                        torch.tensor(orig_size, device=latents.device, dtype=torch.long),
+                        torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
+                        torch.tensor(target_size, device=latents.device, dtype=torch.long),
+                    ]).unsqueeze(0).repeat(latents.shape[0], 1)
+                    print(f"Time embeddings shape: {add_time_ids.shape}")
+                    
+                    # 5. Prepare final inputs for UNet
+                    added_cond_kwargs = {
+                        "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
+                        "time_ids": add_time_ids.to(dtype=torch.float16)
+                    }
+                    
+                    # Print shapes before UNet
+                    print("\nFinal shapes before UNet:")
+                    print(f"Noisy latents: {noisy_latents.shape}")
+                    print(f"Timesteps: {timesteps.shape}")
+                    print(f"Prompt embeds: {prompt_embeds.shape}")
+                    print(f"Text embeds: {added_cond_kwargs['text_embeds'].shape}")
+                    print(f"Time ids: {added_cond_kwargs['time_ids'].shape}")
+                    
+                    # 6. UNet forward pass
+                    noise_pred = pipeline.unet(
+                        noisy_latents,
+                        timesteps,
+                        prompt_embeds,
+                        added_cond_kwargs=added_cond_kwargs
+                    ).sample
+                    print(f"\nPredicted noise shape: {noise_pred.shape}")
+                    
+                    # 7. Compute loss
+                    loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
+                    print(f"Loss value: {loss.item():.4f}")
+                    
+                except RuntimeError as e:
+                    print("\n=== Error Details ===")
+                    print(f"Error: {str(e)}")
+                    print("\nShape mismatch detected. Common causes:")
+                    print("1. Text encoder output shape mismatch with UNet expectations")
+                    print("2. Incorrect pooling of text embeddings")
+                    print("3. Batch size inconsistency")
+                    print("\nTry adjusting the batch size or resolution in config.yaml")
+                    raise e
             
             # Backward pass
             accelerator.backward(loss)

@@ -21,4 +21,8 @@ lora_rank: 4
 lora_alpha: 32
 save_steps: 500
 num_epochs: 100
-use_wandb: false  # Set to true if using Weights & Biases logging 
+use_wandb: false  # Set to true if using Weights & Biases logging
+
+# Add these debug parameters
+debug_mode: true  # Enable detailed shape printing
+print_frequency: 1  # Print debug info every N steps 
