@@ -130,7 +130,7 @@ def run(config):
     )
     
     # Prepare components with accelerator
-    pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
+    unet, optimizer, train_dataloader = accelerator.prepare(
         pipeline.unet, optimizer, train_dataloader
     )
     
@@ -138,7 +138,7 @@ def run(config):
     progress_bar = tqdm(range(config["max_train_steps"]))
     global_step = 0
     
-    pipeline.unet.train()
+    unet.train()
     for epoch in range(config.get("num_epochs", 1)):
         for batch in train_dataloader:
             if global_step >= config["max_train_steps"]:
@@ -168,24 +168,31 @@ def run(config):
             
             # Get time embeddings
             time_ids = batch["time_ids"].to(accelerator.device)
+            
+            # Prepare added conditioning
             added_cond_kwargs = {
                 "text_embeds": pooled_prompt_embeds,
                 "time_ids": time_ids
             }
             
             # Predict noise
-            noise_pred = pipeline.unet(
-                noisy_latents,
-                timesteps,
-                prompt_embeds,
-                added_cond_kwargs=added_cond_kwargs
-            ).sample
+            with accelerator.autocast():
+                noise_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    prompt_embeds,
+                    added_cond_kwargs=added_cond_kwargs
+                ).sample
             
             # Compute loss
             loss = torch.nn.functional.mse_loss(noise_pred, noise)
             
             # Backward pass
             accelerator.backward(loss)
+            
+            if accelerator.sync_gradients:
+                accelerator.clip_grad_norm_(unet.parameters(), 1.0)
+                
             optimizer.step()
             optimizer.zero_grad()
             
@@ -198,10 +205,10 @@ def run(config):
             if global_step % config.get("save_steps", 500) == 0:
                 checkpoint_dir = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
                 os.makedirs(checkpoint_dir, exist_ok=True)
-                pipeline.unet.save_adapter(checkpoint_dir, "lora")
+                unet.save_adapter(checkpoint_dir, "lora")
                 print(f"Saved checkpoint to {checkpoint_dir}")
             
     # Save final LoRA weights
     print(f"Saving LoRA weights to {config['lora_output_dir']}")
-    pipeline.unet.save_adapter(config["lora_output_dir"], "lora")
+    unet.save_adapter(config["lora_output_dir"], "lora")
     print("Training completed successfully!") 
