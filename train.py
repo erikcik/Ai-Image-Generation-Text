@@ -248,9 +248,15 @@ def run(config):
                     return_dict=True
                 ).hidden_states[-2]
                 
+                # Ensure correct shape for pooled embeddings
+                if pooled_prompt_embeds.ndim == 2:
+                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(1).repeat(1, prompt_embeds.shape[1], 1)
+                
                 # Add batch dimension if needed
-                if len(pooled_prompt_embeds.shape) == 2:
-                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(1)
+                if prompt_embeds.ndim == 2:
+                    prompt_embeds = prompt_embeds.unsqueeze(0)
+                if pooled_prompt_embeds.ndim == 2:
+                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(0)
                 
                 # Create time embeddings
                 time_ids = torch.zeros((latents.shape[0], 2), device=latents.device)
@@ -263,7 +269,7 @@ def run(config):
                     torch.tensor(orig_size, device=latents.device),
                     torch.tensor(crops_coords_top_left, device=latents.device),
                     torch.tensor(target_size, device=latents.device),
-                ], dim=1).unsqueeze(0).repeat(latents.shape[0], 1)
+                ], dim=0).unsqueeze(0).repeat(latents.shape[0], 1)
                 
                 # Prepare added conditions
                 add_text_embeds = pooled_prompt_embeds
