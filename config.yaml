@@ -14,4 +14,5 @@ guidance_scale: 7.5
 refiner_steps: 20
 refiner_strength: 0.3
 refiner_guidance: 7.5
-output_format: "png" 
+output_format: "png"
+save_steps: 500  # Save checkpoint every 500 steps 

@@ -6,6 +6,8 @@ from diffusers.optimization import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from data_utils import list_images
+from PIL import Image
+import torchvision.transforms as transforms
 
 class LaceDataset(Dataset):
     def __init__(self, annotations_file, tokenizer, size=512):
@@ -20,22 +22,46 @@ class LaceDataset(Dataset):
         
         self.tokenizer = tokenizer
         self.size = size
+        self.transform = transforms.Compose([
+            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # TODO: Implement image loading and preprocessing
-        # For now return dummy data
+        image = Image.open(self.image_paths[idx]).convert("RGB")
+        image = self.transform(image)
+        
+        # Add SDXL-specific time IDs
+        original_size = (1024, 1024)
+        target_size = (self.size, self.size)
+        crop_coords = (0, 0, self.size, self.size)
+        
+        add_time_ids = torch.tensor([
+            original_size[0],  # Original image width
+            original_size[1],  # Original image height
+            target_size[0],    # Target image width
+            target_size[1],    # Target image height
+            crop_coords[0],    # Crop top
+            crop_coords[1],    # Crop left
+            crop_coords[2],    # Crop bottom
+            crop_coords[3],    # Crop right
+        ])
+        
         return {
-            "pixel_values": torch.randn(3, self.size, self.size),
+            "pixel_values": image,
             "input_ids": self.tokenizer(
                 self.prompts[idx],
                 padding="max_length",
                 max_length=self.tokenizer.model_max_length,
                 truncation=True,
                 return_tensors="pt"
-            ).input_ids.squeeze(0)
+            ).input_ids.squeeze(0),
+            "time_ids": add_time_ids
         }
 
 def run(config):
@@ -117,10 +143,14 @@ def run(config):
             
             encoder_hidden_states = pipeline.text_encoder(batch["input_ids"])[0]
             
+            # Add time embeddings required by SDXL
+            added_cond_kwargs = {"time_ids": batch["time_ids"].to(latents.device)}
+            
             noise_pred = pipeline.unet(
                 noisy_latents,
                 timesteps,
-                encoder_hidden_states
+                encoder_hidden_states,
+                added_cond_kwargs=added_cond_kwargs
             ).sample
             
             # Compute loss
@@ -133,9 +163,15 @@ def run(config):
             
             # Update progress
             progress_bar.update(1)
+            progress_bar.set_description(f"Loss: {loss.item():.4f}")
             global_step += 1
             
-            # TODO: Add logging and checkpoint saving
+            # Save checkpoint periodically
+            if global_step % config.get("save_steps", 500) == 0:
+                checkpoint_dir = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                pipeline.unet.save_lora_weights(checkpoint_dir)
+                print(f"Saved checkpoint to {checkpoint_dir}")
             
     # Save final LoRA weights
     print(f"Saving LoRA weights to {config['lora_output_dir']}")
