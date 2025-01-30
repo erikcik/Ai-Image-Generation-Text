@@ -242,41 +242,40 @@ def run(config):
                 ).hidden_states[-2]
                 
                 # Text encoder 2 (pooled)
-                pooled_prompt_embeds = pipeline.text_encoder_2(
+                pooled_output = pipeline.text_encoder_2(
                     batch["input_ids"],
                     output_hidden_states=True,
                     return_dict=True
-                ).hidden_states[-2]
+                )
+                pooled_prompt_embeds = pooled_output.hidden_states[-2]
                 
-                # Ensure correct shape for pooled embeddings
-                if pooled_prompt_embeds.ndim == 2:
-                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(1).repeat(1, prompt_embeds.shape[1], 1)
+                # Get the final hidden state from text_encoder_2
+                text_encoder_2_output = pooled_output.last_hidden_state
                 
-                # Add batch dimension if needed
+                # Handle the pooled embeddings shape
+                if text_encoder_2_output.ndim == 3:
+                    pooled_prompt_embeds = text_encoder_2_output.mean(dim=1)
+                else:
+                    pooled_prompt_embeds = text_encoder_2_output
+                
+                # Ensure shapes are correct
                 if prompt_embeds.ndim == 2:
                     prompt_embeds = prompt_embeds.unsqueeze(0)
-                if pooled_prompt_embeds.ndim == 2:
-                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(0)
                 
-                # Create time embeddings
-                time_ids = torch.zeros((latents.shape[0], 2), device=latents.device)
-                
-                # Add image size conditioning
+                # Create time embeddings with correct shape
                 orig_size = (int(config["resolution"]), int(config["resolution"]))
                 target_size = (int(config["resolution"]), int(config["resolution"]))
                 crops_coords_top_left = (0, 0)
-                time_ids = torch.cat([
-                    torch.tensor(orig_size, device=latents.device),
-                    torch.tensor(crops_coords_top_left, device=latents.device),
-                    torch.tensor(target_size, device=latents.device),
-                ], dim=0).unsqueeze(0).repeat(latents.shape[0], 1)
                 
-                # Prepare added conditions
-                add_text_embeds = pooled_prompt_embeds
-                add_time_ids = time_ids
+                add_time_ids = torch.cat([
+                    torch.tensor(orig_size, device=latents.device, dtype=torch.long),
+                    torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
+                    torch.tensor(target_size, device=latents.device, dtype=torch.long),
+                ]).unsqueeze(0).repeat(latents.shape[0], 1)
                 
+                # Prepare added conditions with correct shapes
                 added_cond_kwargs = {
-                    "text_embeds": add_text_embeds.to(dtype=torch.float16),
+                    "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
                     "time_ids": add_time_ids.to(dtype=torch.float16)
                 }
                 
