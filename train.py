@@ -233,22 +233,45 @@ def run(config):
                 )
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
-                # Get text embeddings for SDXL (both text encoders)
+                # Get text embeddings for SDXL
+                # Text encoder 1 (main)
                 prompt_embeds = pipeline.text_encoder(
                     batch["input_ids"],
                     output_hidden_states=True,
-                )[0]
+                    return_dict=True
+                ).hidden_states[-2]
                 
-                # Get pooled output for the second text encoder
+                # Text encoder 2 (pooled)
                 pooled_prompt_embeds = pipeline.text_encoder_2(
                     batch["input_ids"],
                     output_hidden_states=True,
-                ).hidden_states[-1]
+                    return_dict=True
+                ).hidden_states[-2]
                 
-                # Concatenate embeddings for SDXL
+                # Add batch dimension if needed
+                if len(pooled_prompt_embeds.shape) == 2:
+                    pooled_prompt_embeds = pooled_prompt_embeds.unsqueeze(1)
+                
+                # Create time embeddings
+                time_ids = torch.zeros((latents.shape[0], 2), device=latents.device)
+                
+                # Add image size conditioning
+                orig_size = (int(config["resolution"]), int(config["resolution"]))
+                target_size = (int(config["resolution"]), int(config["resolution"]))
+                crops_coords_top_left = (0, 0)
+                time_ids = torch.cat([
+                    torch.tensor(orig_size, device=latents.device),
+                    torch.tensor(crops_coords_top_left, device=latents.device),
+                    torch.tensor(target_size, device=latents.device),
+                ], dim=1).unsqueeze(0).repeat(latents.shape[0], 1)
+                
+                # Prepare added conditions
+                add_text_embeds = pooled_prompt_embeds
+                add_time_ids = time_ids
+                
                 added_cond_kwargs = {
-                    "text_embeds": pooled_prompt_embeds,
-                    "time_ids": torch.zeros(latents.shape[0], 2).to(accelerator.device),
+                    "text_embeds": add_text_embeds.to(dtype=torch.float16),
+                    "time_ids": add_time_ids.to(dtype=torch.float16)
                 }
                 
                 # Predict noise
@@ -256,7 +279,7 @@ def run(config):
                     noisy_latents,
                     timesteps,
                     prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs,
+                    added_cond_kwargs=added_cond_kwargs
                 ).sample
                 
                 # Compute loss
