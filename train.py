@@ -144,14 +144,23 @@ def run(config):
             if global_step >= config["max_train_steps"]:
                 break
                 
-            # Get text embeddings from both text encoders
-            prompt_embeds = pipeline.text_encoder(
-                batch["prompt_ids"].to(accelerator.device)
-            )[0]
-            pooled_prompt_embeds = pipeline.text_encoder_2(
-                batch["prompt_ids"].to(accelerator.device)
-            )[0]
+            # Get embeddings from both text encoders
+            text_inputs = pipeline.tokenizer_2(
+                [self.prompts[idx] for idx in batch["indices"]],
+                padding="max_length",
+                max_length=pipeline.tokenizer_2.model_max_length,
+                truncation=True,
+                return_tensors="pt"
+            ).to(accelerator.device)
             
+            # Get text embeddings from both encoders
+            prompt_embeds = pipeline.text_encoder(text_inputs.input_ids)[0]
+            pooled_prompt_embeds = pipeline.text_encoder_2(text_inputs.input_ids)[1]
+
+            # Prepare time_ids with correct dimensions
+            time_ids = batch["time_ids"].to(accelerator.device)
+            time_ids = time_ids.unsqueeze(1).expand(-1, pipeline.unet.config.addition_time_embed_dim, -1)
+
             # Forward pass
             latents = pipeline.vae.encode(
                 batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
@@ -166,23 +175,16 @@ def run(config):
             )
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            # Get time embeddings
-            time_ids = batch["time_ids"].to(accelerator.device)
-            
-            # Prepare added conditioning
-            added_cond_kwargs = {
-                "text_embeds": pooled_prompt_embeds,
-                "time_ids": time_ids
-            }
-            
-            # Predict noise
-            with accelerator.autocast():
-                noise_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs
-                ).sample
+            # UNet forward pass with proper conditioning
+            noise_pred = unet(
+                noisy_latents,
+                timesteps,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs={
+                    "text_embeds": pooled_prompt_embeds,
+                    "time_ids": time_ids
+                }
+            ).sample
             
             # Compute loss
             loss = torch.nn.functional.mse_loss(noise_pred, noise)
