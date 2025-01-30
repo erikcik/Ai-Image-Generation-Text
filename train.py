@@ -64,8 +64,15 @@ def run(config):
         "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
     }
     
-    # Convert UNet to use LoRA
-    pipeline.unet.enable_xformers_memory_efficient_attention()
+    # Try to enable memory efficient attention
+    try:
+        pipeline.unet.enable_xformers_memory_efficient_attention()
+        print("Successfully enabled xformers memory efficient attention")
+    except Exception as e:
+        print("Warning: xformers not available. Using default attention. This may increase memory usage.")
+        print("To install xformers, run: pip install xformers")
+    
+    # Enable gradient checkpointing for memory efficiency
     pipeline.unet.enable_gradient_checkpointing()
     
     # Initialize LoRA weights

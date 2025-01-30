@@ -22,6 +22,7 @@ drive.mount('/content/drive')
 
 # Install dependencies
 !pip install -q diffusers transformers accelerate safetensors
+!pip install -q xformers
 !sudo apt -qq install git-lfs
 
 # Change to your project directory
@@ -34,7 +35,16 @@ drive.mount('/content/drive')
 ### Option 2: Local Setup
 1. Install dependencies:
 ```bash
+# Basic dependencies
 pip install diffusers transformers accelerate safetensors
+
+# Optional but recommended for memory efficient training
+pip install xformers
+
+# If xformers installation fails, try:
+pip install -U xformers --index-url https://download.pytorch.org/whl/cu118
+# OR
+pip install -U xformers --index-url https://download.pytorch.org/whl/cu121
 ```
 
 2. Create directories:
@@ -121,6 +131,16 @@ python main.py --mode inference
 **Model Loading Errors**
 - Verify model paths in config
 - Check available disk space on Google Drive
+
+**Xformers Installation Error**
+- Error message: "Unable to register cuFFT factory" or xformers related errors
+- Solutions:
+  1. Install xformers manually: `pip install xformers`
+  2. If that fails, try installing with CUDA version specific index:
+     ```bash
+     pip install -U xformers --index-url https://download.pytorch.org/whl/cu118
+     ```
+  3. If xformers cannot be installed, the model will still work but may use more memory
 
 ## Advanced Usage <a name="advanced-usage"></a>
 
