@@ -25,4 +25,9 @@ use_wandb: false  # Set to true if using Weights & Biases logging
 
 # Add these debug parameters
 debug_mode: true  # Enable detailed shape printing
-print_frequency: 1  # Print debug info every N steps 
+print_frequency: 1  # Print debug info every N steps
+
+# Add these parameters
+text_encoder_projection: true  # Enable text encoder projection
+main_embed_dim: 2048          # Target dimension for main embeddings
+pooled_embed_dim: 1280        # Target dimension for pooled embeddings 

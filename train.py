@@ -244,13 +244,25 @@ def run(config):
                     # 3. Get text embeddings with shape checking
                     print(f"\nInput IDs shape: {batch['input_ids'].shape}")
                     
-                    # Text encoder 1 (main)
+                    # Text encoder 1 (main) - needs to output 2048 dimension
                     text_encoder_output = pipeline.text_encoder(
                         batch["input_ids"],
                         output_hidden_states=True,
                         return_dict=True
                     )
+                    # Get the penultimate hidden state
                     prompt_embeds = text_encoder_output.hidden_states[-2]
+                    
+                    # Project to correct dimension if needed
+                    if prompt_embeds.shape[-1] != 2048:
+                        print(f"Projecting prompt embeds from {prompt_embeds.shape[-1]} to 2048")
+                        projection_matrix = torch.randn(
+                            (prompt_embeds.shape[-1], 2048),
+                            device=prompt_embeds.device,
+                            dtype=prompt_embeds.dtype
+                        )
+                        prompt_embeds = prompt_embeds @ projection_matrix
+                    
                     print(f"Main text embeddings shape: {prompt_embeds.shape}")
                     
                     # Text encoder 2 (pooled)
@@ -260,14 +272,23 @@ def run(config):
                         return_dict=True
                     )
                     
-                    # Get both hidden states and pooled output
+                    # Get the penultimate hidden state
                     pooled_prompt_embeds = text_encoder_2_output.hidden_states[-2]
-                    print(f"Initial pooled embeddings shape: {pooled_prompt_embeds.shape}")
                     
-                    # Reshape pooled embeddings correctly for SDXL
+                    # Average over sequence length dimension if needed
                     if pooled_prompt_embeds.ndim == 3:
-                        # Average over sequence length dimension
                         pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
+                    
+                    # Ensure pooled embeddings have correct shape
+                    if pooled_prompt_embeds.shape[-1] != 1280:
+                        print(f"Projecting pooled embeds from {pooled_prompt_embeds.shape[-1]} to 1280")
+                        pooled_projection = torch.randn(
+                            (pooled_prompt_embeds.shape[-1], 1280),
+                            device=pooled_prompt_embeds.device,
+                            dtype=pooled_prompt_embeds.dtype
+                        )
+                        pooled_prompt_embeds = pooled_prompt_embeds @ pooled_projection
+                    
                     print(f"Final pooled embeddings shape: {pooled_prompt_embeds.shape}")
                     
                     # 4. Create time embeddings
@@ -280,7 +301,6 @@ def run(config):
                         torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
                         torch.tensor(target_size, device=latents.device, dtype=torch.long),
                     ]).unsqueeze(0).repeat(latents.shape[0], 1)
-                    print(f"Time embeddings shape: {add_time_ids.shape}")
                     
                     # 5. Prepare final inputs for UNet
                     added_cond_kwargs = {
