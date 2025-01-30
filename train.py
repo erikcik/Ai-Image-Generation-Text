@@ -71,13 +71,21 @@ def run(config):
     print(f"Loading base model: {config['pretrained_model']}")
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         config["pretrained_model"],
-        torch_dtype=torch.float16,  # Ensure float16 for all components
+        torch_dtype=torch.float16,
         variant="fp16",
         use_safetensors=True
     )
     
-    # Move all pipeline components to float16
-    pipeline.to(torch.float16)
+    # Move all pipeline components to float16 and GPU
+    pipeline.to(accelerator.device, torch.float16)
+    
+    # Make sure both text encoders are available
+    if not hasattr(pipeline, 'text_encoder_2'):
+        raise ValueError("SDXL pipeline missing text_encoder_2. Make sure you're using the correct model.")
+    
+    # Move text encoders to device
+    pipeline.text_encoder = pipeline.text_encoder.to(accelerator.device, dtype=torch.float16)
+    pipeline.text_encoder_2 = pipeline.text_encoder_2.to(accelerator.device, dtype=torch.float16)
     
     # Setup LoRA configuration
     lora_config = {
@@ -190,7 +198,6 @@ def run(config):
     
     # Move VAE and text encoder to GPU and float16
     pipeline.vae = pipeline.vae.to(accelerator.device, dtype=torch.float16)
-    pipeline.text_encoder = pipeline.text_encoder.to(accelerator.device, dtype=torch.float16)
     
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=1000,
@@ -214,29 +221,54 @@ def run(config):
             
             # Forward pass
             with torch.autocast(device_type='cuda', dtype=torch.float16):
+                # Encode images
                 latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
                 latents = latents * 0.18215
                 
+                # Add noise
                 noise = torch.randn_like(latents)
                 timesteps = torch.randint(
-                    0, noise_scheduler.num_train_timesteps, (latents.shape[0],),
+                    0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
                     device=latents.device
                 )
-                
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
                 
-                encoder_hidden_states = pipeline.text_encoder(batch["input_ids"])[0]
+                # Get text embeddings for SDXL (both text encoders)
+                prompt_embeds = pipeline.text_encoder(
+                    batch["input_ids"],
+                    output_hidden_states=True,
+                )[0]
                 
+                # Get pooled output for the second text encoder
+                pooled_prompt_embeds = pipeline.text_encoder_2(
+                    batch["input_ids"],
+                    output_hidden_states=True,
+                ).hidden_states[-1]
+                
+                # Concatenate embeddings for SDXL
+                added_cond_kwargs = {
+                    "text_embeds": pooled_prompt_embeds,
+                    "time_ids": torch.zeros(latents.shape[0], 2).to(accelerator.device),
+                }
+                
+                # Predict noise
                 noise_pred = pipeline.unet(
                     noisy_latents,
                     timesteps,
-                    encoder_hidden_states
+                    prompt_embeds,
+                    added_cond_kwargs=added_cond_kwargs,
                 ).sample
                 
+                # Compute loss
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
             
             # Backward pass
             accelerator.backward(loss)
+            
+            # Log loss
+            if global_step % 10 == 0:
+                print(f"\nStep {global_step}: Loss = {loss.item():.4f}")
+            
             optimizer.step()
             optimizer.zero_grad()
             
