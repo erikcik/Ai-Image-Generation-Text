@@ -81,14 +81,22 @@ def run(config):
     print(f"Loading base model: {config['pretrained_model']}")
     pipeline = StableDiffusionXLPipeline.from_pretrained(
         config["pretrained_model"],
-        torch_dtype=torch.float16
+        torch_dtype=torch.float16,
+        use_safetensors=True,
+        variant="fp16"
     ).to("cuda")
     
-    # Freeze base model and add LoRA
+    # Freeze base model parameters
+    pipeline.text_encoder.requires_grad_(False)
+    pipeline.text_encoder_2.requires_grad_(False)
+    pipeline.vae.requires_grad_(False)
+    pipeline.unet.requires_grad_(False)
+    
+    # Enable gradient checkpointing and VAE slicing
     pipeline.unet.enable_gradient_checkpointing()
     pipeline.vae.enable_slicing()
     
-    # Add LoRA layers
+    # Add LoRA layers to UNet
     pipeline.unet.add_adapter(
         adapter_name="lora",
         rank=config.get("lora_rank", 4),
@@ -97,7 +105,7 @@ def run(config):
     
     # Configure training parameters
     optimizer = torch.optim.AdamW(
-        pipeline.unet.parameters(),
+        filter(lambda p: p.requires_grad, pipeline.unet.parameters()),
         lr=config["learning_rate"],
         weight_decay=1e-4
     )
@@ -136,8 +144,11 @@ def run(config):
             if global_step >= config["max_train_steps"]:
                 break
                 
-            # Get text embeddings
-            text_embeddings = pipeline.text_encoder(
+            # Get text embeddings from both text encoders
+            prompt_embeds = pipeline.text_encoder(
+                batch["prompt_ids"].to(accelerator.device)
+            )[0]
+            pooled_prompt_embeds = pipeline.text_encoder_2(
                 batch["prompt_ids"].to(accelerator.device)
             )[0]
             
@@ -157,13 +168,16 @@ def run(config):
             
             # Get time embeddings
             time_ids = batch["time_ids"].to(accelerator.device)
-            added_cond_kwargs = {"time_ids": time_ids}
+            added_cond_kwargs = {
+                "text_embeds": pooled_prompt_embeds,
+                "time_ids": time_ids
+            }
             
             # Predict noise
             noise_pred = pipeline.unet(
                 noisy_latents,
                 timesteps,
-                text_embeddings,
+                prompt_embeds,
                 added_cond_kwargs=added_cond_kwargs
             ).sample
             
