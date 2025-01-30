@@ -6,38 +6,55 @@ from diffusers.loaders import StableDiffusionXLLoraLoaderMixin
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
-from data_utils import list_images
+from data_utils import list_images, create_annotations
 from safetensors.torch import save_file
+from PIL import Image
+import torchvision.transforms as transforms
 
 class LaceDataset(Dataset):
-    def __init__(self, annotations_file, tokenizer, size=512):
-        self.image_paths = []
-        self.prompts = []
+    def __init__(self, image_dir, instance_prompt, tokenizer, size=512):
+        """Initialize dataset with direct image loading.
         
-        with open(annotations_file, 'r') as f:
-            for line in f:
-                path, prompt = line.strip().split('\t')
-                self.image_paths.append(path)
-                self.prompts.append(prompt)
-        
+        Args:
+            image_dir: Directory containing images
+            instance_prompt: Prompt to use for all images
+            tokenizer: Tokenizer for text processing
+            size: Image size for training
+        """
+        self.image_paths = list_images(image_dir)
+        self.instance_prompt = instance_prompt
         self.tokenizer = tokenizer
         self.size = size
+        
+        self.transform = transforms.Compose([
+            transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+            transforms.CenterCrop(size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5], [0.5])
+        ])
 
     def __len__(self):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # TODO: Implement image loading and preprocessing
-        # For now return dummy data
+        image_path = self.image_paths[idx]
+        
+        # Load and transform image
+        image = Image.open(image_path).convert('RGB')
+        pixel_values = self.transform(image)
+        
+        # Tokenize prompt
+        tokenized = self.tokenizer(
+            self.instance_prompt,
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt"
+        )
+        
         return {
-            "pixel_values": torch.randn(3, self.size, self.size),
-            "input_ids": self.tokenizer(
-                self.prompts[idx],
-                padding="max_length",
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors="pt"
-            ).input_ids.squeeze(0)
+            "pixel_values": pixel_values,
+            "input_ids": tokenized.input_ids.squeeze(0)
         }
 
 def run(config):
@@ -142,24 +159,15 @@ def run(config):
     
     print(f"Number of trainable parameters: {len(trainable_params)}")
     
-    optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=float(config["learning_rate"]),
-        weight_decay=1e-4
-    )
-    
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=1000,
-        beta_start=0.0001,
-        beta_end=0.02
-    )
-    
-    # Prepare dataset and dataloader
+    # Initialize dataset directly (no annotations file needed)
     dataset = LaceDataset(
-        os.path.join(config["images_dir"], "annotations.txt"),
+        image_dir=config["images_dir"],
+        instance_prompt=config["instance_prompt"],
         tokenizer=pipeline.tokenizer,
         size=int(config["resolution"])
     )
+    
+    print(f"Dataset initialized with {len(dataset)} images")
     
     train_dataloader = DataLoader(
         dataset,
@@ -167,9 +175,21 @@ def run(config):
         shuffle=True
     )
     
+    optimizer = torch.optim.AdamW(
+        trainable_params,
+        lr=float(config["learning_rate"]),
+        weight_decay=1e-4
+    )
+    
     # Prepare for training
     pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
         pipeline.unet, optimizer, train_dataloader
+    )
+    
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=1000,
+        beta_start=0.0001,
+        beta_end=0.02
     )
     
     # Training loop
