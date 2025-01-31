@@ -254,13 +254,13 @@ def run(config):
                 
                 # Save checkpoint
                 if global_step > 0 and global_step % config["save_steps"] == 0:
-                    if validate_checkpoint(lora_state_dict):
+                    try:
                         save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
                         os.makedirs(save_path, exist_ok=True)
-                        save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
-                        print(f"\nSaved valid checkpoint at step {global_step}")
-                    else:
-                        print(f"\nSkipped saving invalid checkpoint at step {global_step}")
+                        save_lora_weights(pipeline.unet, save_path)
+                        print(f"Saved valid checkpoint at step {global_step}")
+                    except Exception as e:
+                        print(f"Failed to save checkpoint: {str(e)}")
                 
                 global_step += 1
                 if global_step >= config["max_train_steps"]:
@@ -269,48 +269,72 @@ def run(config):
     except Exception as e:
         print(f"\nTraining interrupted: {str(e)}")
         # Save checkpoint on error
-        save_path = os.path.join(config["lora_output_dir"], f"checkpoint-interrupted")
-        os.makedirs(save_path, exist_ok=True)
-        save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+        save_lora_weights(pipeline.unet, config["lora_output_dir"], None)
         raise e
     
-    # Save final weights
-    save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
     print("\nTraining completed successfully!")
 
+    # And for final save:
+    try:
+        save_lora_weights(pipeline.unet, config["lora_output_dir"])
+        print("Saved final LoRA weights")
+    except Exception as e:
+        print(f"Failed to save final weights: {str(e)}")
+        raise
+
 def initialize_lora(pipeline, config):
-    """Initialize LoRA weights properly"""
+    """Initialize LoRA weights properly with Xavier initialization"""
     lora_state_dict = {}
     found_modules = 0
     
     for name, module in pipeline.unet.named_modules():
         if any(target in name for target in ["to_q", "to_k", "to_v", "to_out.0"]):
             if hasattr(module, "weight"):
-                in_features = module.weight.shape[1]
-                out_features = module.weight.shape[0]
+                in_features = module.in_features
+                out_features = module.out_features
                 
-                # Initialize LoRA weights with small random values
-                lora_down = torch.randn((config["lora_rank"], in_features), 
-                                     dtype=torch.float16, 
-                                     device=module.weight.device) * 0.02
-                lora_up = torch.randn((out_features, config["lora_rank"]), 
-                                    dtype=torch.float16,
-                                    device=module.weight.device) * 0.02
+                # Initialize LoRA weights with proper initialization
+                lora_down = torch.nn.Linear(in_features, config["lora_rank"], bias=False)
+                lora_up = torch.nn.Linear(config["lora_rank"], out_features, bias=False)
                 
-                # Scale weights based on rank
-                scaling = float(config["lora_alpha"]) / config["lora_rank"]
-                lora_down.requires_grad_(True)
-                lora_up.requires_grad_(True)
+                # Xavier initialization
+                torch.nn.init.xavier_uniform_(lora_down.weight)
+                torch.nn.init.zeros_(lora_up.weight)
                 
-                lora_state_dict[f"{name}.lora_down.weight"] = lora_down
-                lora_state_dict[f"{name}.lora_up.weight"] = lora_up
-                lora_state_dict[f"{name}.alpha"] = torch.tensor(scaling)
+                # Move to device and set dtype
+                lora_down = lora_down.to(device=module.weight.device, dtype=torch.float16)
+                lora_up = lora_up.to(device=module.weight.device, dtype=torch.float16)
+                
+                # Register parameters
+                module.lora_down = lora_down
+                module.lora_up = lora_up
+                
+                # Store references for training
+                lora_state_dict[f"{name}.lora_down.weight"] = lora_down.weight
+                lora_state_dict[f"{name}.lora_up.weight"] = lora_up.weight
                 
                 found_modules += 1
-                print(f"Initialized LoRA for {name}: {in_features} -> {config['lora_rank']} -> {out_features}")
+                print(f"Initialized LoRA for {name}")
     
     print(f"Initialized {found_modules} LoRA modules")
     return lora_state_dict
+
+def save_lora_weights(pipeline, output_dir, global_step=None):
+    """Extract and save LoRA weights from the UNet"""
+    lora_state_dict = {}
+    
+    for name, module in pipeline.unet.named_modules():
+        if any(target in name for target in ["to_q", "to_k", "to_v", "to_out.0"]):
+            if hasattr(module, "lora_down"):
+                lora_state_dict[f"{name}.lora_down.weight"] = module.lora_down.weight.detach().cpu()
+                lora_state_dict[f"{name}.lora_up.weight"] = module.lora_up.weight.detach().cpu()
+    
+    if not lora_state_dict:
+        raise ValueError("No LoRA weights found in UNet")
+    
+    save_path = os.path.join(output_dir, "pytorch_lora_weights.safetensors")
+    save_file(lora_state_dict, save_path)
+    print(f"Saved LoRA weights to {save_path}")
 
 def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config, trainable_params, scaler):
     """Single training step with improved stability"""
