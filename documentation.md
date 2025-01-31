@@ -1,139 +1,148 @@
-# AI Image Generation Model Documentation
+# AI Image Generation System Documentation
 
-## Overview
-This project implements a Stable Diffusion XL-based image generation system with LoRA fine-tuning, specifically designed for lace embroidered fabric designs.
+## Table of Contents
+1. [Environment Setup](#environment-setup)
+2. [Configuration Guide](#configuration-guide)
+3. [Training Process](#training-process)
+4. [Image Generation](#image-generation)
+5. [Troubleshooting](#troubleshooting)
+6. [Best Practices](#best-practices)
 
-## Setup Instructions
+## Environment Setup <a name="environment-setup"></a>
 
-### 1. Google Colab Environment Setup
-1. Open Google Colab
-2. Mount Google Drive:
-   ```python
-   from google.colab import drive
-   drive.mount('/content/drive')
-   ```
-3. Install required dependencies:
-   ```bash
-   pip install torch diffusers transformers accelerate wandb
-   ```
+### Requirements
+- Google Colab Pro+ (Recommended)
+- NVIDIA GPU (T4 or better)
+- Python 3.9+
+- 15GB+ Disk Space
 
-### 2. Project Structure
-Place your images in Google Drive (e.g., `/content/drive/MyDrive/babanne-images/`). The project consists of:
-- `config.yaml`: Configuration parameters
-- `main.py`: CLI entry point
-- `train.py`: LoRA training implementation
-- `inference.py`: Image generation and refinement
-- `data_utils.py`: Image processing utilities
+### Installation Steps
+```bash
+# Install core dependencies
+!pip install torch==2.0.1+cu118
+!pip install diffusers==0.19.3 transformers==4.31.0 accelerate==0.21.0
 
-### 3. Configuration
-Edit `config.yaml` to set your parameters:
+# Install additional utilities
+!pip install xformers wandb safetensors
+```
+
+### Google Drive Mounting
+```python
+from google.colab import drive
+drive.mount('/content/drive')
+```
+
+## Configuration Guide <a name="configuration-guide"></a>
+
+### config.yaml Structure
 ```yaml
 drive_mount_path: "/content/drive"
 images_dir: "/content/drive/MyDrive/babanne-images"
 lora_output_dir: "/content/drive/MyDrive/lora_output"
-instance_prompt: "a photo of <myspecialstyle>"
-resolution: 512
-train_batch_size: 2
-learning_rate: 1e-4
-max_train_steps: 1000
+instance_prompt: "a photo of <myspecialstyle> lace fabric"
+# ... other parameters
 ```
 
-## Usage Guide
-
-### 1. Training Process
-1. Prepare your training images (200-300 .jpg files) in the specified Google Drive folder
-2. Run training:
-   ```bash
-   python main.py --mode train
+### Required Modifications
+1. Set `images_dir` to your Google Drive folder containing lace images
+2. Customize `instance_prompt` with your unique token
+3. Adjust training parameters based on GPU capacity:
+   ```yaml
+   train_batch_size: 1  # Reduce if OOM errors occur
+   resolution: 512      # 768 for higher quality (requires more VRAM)
    ```
-3. Monitor the training progress in the output log
-4. LoRA weights will be saved to `lora_output_dir`
 
-### 2. Generating Images
-1. Run inference:
-   ```bash
-   python main.py --mode inference
-   ```
-2. Generated images will be:
-   - Created using the base SDXL model with LoRA weights
-   - Refined using the SDXL refiner
-   - Saved to the specified output directory
+## Training Process <a name="training-process"></a>
 
-### 3. Advanced Configuration
+### Starting Training
+```bash
+python main.py --mode train
+```
 
-#### Training Parameters
-- `train_batch_size`: Adjust based on available GPU memory
-- `learning_rate`: Default 1e-4, adjust if training is unstable
-- `max_train_steps`: Increase for better results, decrease for faster training
+### Expected Output
+```
+Mounting Google Drive...
+Starting LoRA training...
+Loading base model: stabilityai/stable-diffusion-xl-base-1.0
+Creating annotations for 250 images...
+Step 100, Loss: 0.1245
+Saved checkpoint at step 500
+Training completed successfully!
+```
 
-#### Inference Parameters
-- `num_inference_steps`: More steps = better quality but slower
-- `guidance_scale`: Higher values = stronger adherence to prompt
-- `refiner_strength`: Controls refinement intensity (0.0-1.0)
+### Monitoring Training
+1. Check loss values decreasing over time
+2. Verify checkpoint saving
+3. Monitor GPU memory usage (nvidia-smi)
 
-## Troubleshooting
+## Image Generation <a name="image-generation"></a>
+
+### Generating New Designs
+```bash
+python main.py --mode inference
+```
+
+### Output Files
+- `refined_output.png` in your lora_output_dir
+- Multiple versions with timestamps if run repeatedly
+
+### Custom Prompts
+Modify `instance_prompt` in config.yaml:
+```yaml
+instance_prompt: "close-up of <myspecialstyle> lace pattern with gold threads"
+```
+
+## Troubleshooting <a name="troubleshooting"></a>
 
 ### Common Issues
 
-1. Out of Memory (OOM) Errors
-   - Reduce `train_batch_size`
-   - Enable gradient checkpointing
-   - Use mixed precision training
+**1. CUDA Out of Memory**
+```bash
+# Solutions:
+- Reduce batch_size in config.yaml
+- Lower resolution to 512
+- Enable memory optimizations:
+  ```python
+  pipe.enable_xformers_memory_efficient_attention()
+  pipe.enable_model_cpu_offload()
+  ```
 
-2. Image Quality Issues
-   - Increase `num_inference_steps`
-   - Adjust `guidance_scale`
-   - Try different `refiner_strength` values
+**2. Missing Dependencies**
+```bash
+# Fix missing packages
+!pip install [missing-package]
+```
 
-3. Training Problems
-   - Check image format compatibility
-   - Verify prompt formatting
-   - Ensure proper Google Drive mounting
+**3. Poor Generation Quality**
+- Increase training steps (2000-5000)
+- Use higher quality source images
+- Experiment with different learning rates (1e-5 to 1e-4)
 
-### Error Messages
+## Best Practices <a name="best-practices"></a>
 
-1. "CUDA out of memory"
-   - Solution: Reduce batch size or image resolution
+### Training Tips
+- Use 200-300 high-quality JPEG images
+- Maintain consistent image dimensions
+- Use descriptive prompts with unique token
+- Start with 1000 training steps, increase gradually
 
-2. "No such file or directory"
-   - Check Google Drive paths
-   - Verify file permissions
+### Generation Tips
+- Try different refiner strengths (0.2-0.5)
+- Experiment with guidance scales (5-15)
+- Combine with negative prompts:
+  ```yaml
+  negative_prompt: "blurry, low quality, duplicate"
+  ```
 
-3. "Failed to load LoRA weights"
-   - Ensure training completed successfully
-   - Check path to LoRA weights
+### Performance Optimization
+```yaml
+# config.yaml optimizations
+mixed_precision: "fp16"  # For modern GPUs
+gradient_checkpointing: true
+use_xformers: true
+```
 
-## Best Practices
-
-1. Image Preparation
-   - Use high-quality source images
-   - Maintain consistent image sizes
-   - Ensure proper file formats (.jpg preferred)
-
-2. Training
-   - Start with default parameters
-   - Monitor training loss
-   - Save checkpoints regularly
-
-3. Inference
-   - Test different prompt variations
-   - Experiment with guidance scales
-   - Use batch processing for multiple images
-
-## Performance Optimization
-
-1. Training Speed
-   - Use mixed precision training
-   - Enable gradient checkpointing
-   - Optimize batch size
-
-2. Memory Usage
-   - Monitor GPU memory
-   - Clean cache between generations
-   - Use appropriate precision settings
-
-## Support and Resources
-
-- Diffusers Documentation: [Hugging Face Diffusers](https://huggingface.co/docs/diffusers)
-- SDXL Documentation: [Stability AI](https://stability.ai/stable-diffusion)
-- LoRA Paper: [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685) 
+## Support <a name="support"></a>
+- [Diffusers Documentation](https://huggingface.co/docs/diffusers)
+- [LoRA Training Guide](https://huggingface.co/docs/diffusers/training/lora)
+- [SDXL Technical Report](https://arxiv.org/abs/2307.01952) 

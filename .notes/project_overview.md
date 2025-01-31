@@ -266,3 +266,340 @@ Below are sample prompts that developers might use to implement each stage accor
    update task_list.md to show documentation is completed
    ```
 
+Documentation:
+Below is a minimal (but end-to-end) illustration of how you might:
+
+    Gather a dataset (200–300 .jpg lace embroidered fabric images).
+    Train a LoRA (Low-Rank Adaptation) on the Stable Diffusion XL Base model (stabilityai/stable-diffusion-xl-base-1.0).
+    Generate new images using your fine-tuned LoRA weights.
+    Refine the generated images using the Stable Diffusion XL Refiner (stabilityai/stable-diffusion-xl-refiner-1.0).
+
+    Important
+
+        This code is purely demonstrative/minimal. You’ll almost certainly need to adjust hyperparameters (learning rate, batch size, number of steps, etc.) for quality results.
+        The Hugging Face diffusers repository contains official, more complete training scripts (like train_text_to_image_lora.py), which you can customize.
+        Make sure to install packages: pip install diffusers transformers accelerate datasets safetensors xformers (plus xformers if you want memory-efficient attention).
+        You must have a GPU (e.g., via a cloud service or a local machine with CUDA) for training and inference in a reasonable time.
+
+1. Directory Structure
+
+Assume you have a directory with your training images (200–300 .jpg files) like:
+
+my_lace_dataset/
+    image_0001.jpg
+    image_0002.jpg
+    ...
+    image_0300.jpg
+
+2. Minimal Training Code (LoRA on SDXL Base)
+
+Below is a single-file example (call it train_lora_sdxl.py) that:
+
+    Loads images from my_lace_dataset/.
+    Uses a basic Hugging Face Dataset wrapper.
+    Trains LoRA on the SDXL base model.
+
+#!/usr/bin/env python
+# train_lora_sdxl.py
+
+import os
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+
+from diffusers import AutoPipelineForText2Image, DDPMScheduler
+from diffusers.optimization import LoRAConfig, LoRAAttnProcs
+from transformers import AutoTokenizer
+from datasets import load_dataset
+
+from accelerate import Accelerator
+from tqdm.auto import tqdm
+
+# -----------------
+# 1. Hyperparameters
+# -----------------
+MODEL_NAME = "stabilityai/stable-diffusion-xl-base-1.0"
+OUTPUT_DIR = "./sdxl-lora-lace"
+BATCH_SIZE = 1
+LEARNING_RATE = 1e-4
+NUM_TRAIN_STEPS = 1000  # Adjust as needed
+LORA_RANK = 4           # LoRA rank
+TRAIN_CAPTION = "lace embroidered fabric"  # Simple universal caption for all images (example)
+
+# -----------------
+# 2. Prepare Dataset
+# -----------------
+class LaceImagesDataset(Dataset):
+    def __init__(self, image_folder, caption):
+        self.paths = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.endswith(".jpg")]
+        self.caption = caption
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, idx):
+        path = self.paths[idx]
+        image = Image.open(path).convert("RGB")
+        return {
+            "pixel_values": image,
+            "text": self.caption
+        }
+
+def collate_fn(examples):
+    # images and captions in batch
+    images = [ex["pixel_values"] for ex in examples]
+    texts = [ex["text"] for ex in examples]
+    return {
+        "pixel_values": images,
+        "text": texts
+    }
+
+# Instantiate dataset & data loader
+dataset = LaceImagesDataset("my_lace_dataset", TRAIN_CAPTION)
+train_dataloader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+
+# -----------------
+# 3. Initialize Accelerator
+# -----------------
+accelerator = Accelerator(
+    mixed_precision="fp16"  # or "bf16", depending on your hardware
+)
+
+# -----------------
+# 4. Load Base Pipeline
+# -----------------
+print("Loading base SDXL pipeline...")
+pipeline = AutoPipelineForText2Image.from_pretrained(
+    MODEL_NAME,
+    torch_dtype=torch.float16
+).to(accelerator.device)
+
+# We will need the text encoder tokenizer for text processing
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, subfolder="tokenizer")
+
+# Switch to a simpler scheduler for training (e.g., DDPMScheduler or EulerAncestralDiscreteScheduler, etc.)
+pipeline.scheduler = DDPMScheduler.from_config(pipeline.scheduler.config)
+
+# -----------------
+# 5. Set Up LoRA
+# -----------------
+# Create LoRA config
+lora_config = LoRAConfig(
+    r=LORA_RANK,
+    alpha=1.0,
+    dropout=0.0,
+    bias="none",
+    # We only want to adapt cross-attention layers
+    # so we set `target_modules` to ["CrossAttention"]
+    # If you want to adapt unet + text encoder, you can specify that too.
+)
+
+# Create LoRA-attention processors
+lora_attn_procs = LoRAAttnProcs(pipeline.unet, lora_config)
+pipeline.unet.set_attn_processor(lora_attn_procs)
+
+# Optionally, also adapt the text encoder’s attention (commented out for minimal example)
+# text_encoder_attn_procs = LoRAAttnProcs(pipeline.text_encoder, lora_config)
+# pipeline.text_encoder.set_attn_processor(text_encoder_attn_procs)
+
+# -----------------
+# 6. Optimizer
+# -----------------
+# Collect trainable parameters from LoRA
+params_to_optimize = (
+    lora_attn_procs.parameters()
+    # + text_encoder_attn_procs.parameters() # if you also adapt the text encoder
+)
+optimizer = torch.optim.AdamW(params_to_optimize, lr=LEARNING_RATE)
+
+# Prepare everything with Accelerator
+pipeline.unet, optimizer, train_dataloader = accelerator.prepare(
+    pipeline.unet, optimizer, train_dataloader
+)
+
+# -----------------
+# 7. Training Loop
+# -----------------
+global_step = 0
+pipeline.unet.train()
+
+for epoch in range(1000):  # a simple loop, you might want to rely on global steps
+    for batch in tqdm(train_dataloader, desc=f"Epoch {epoch}"):
+        # Convert images to tensor
+        images = [img.resize((512,512)) for img in batch["pixel_values"]]
+        images = torch.stack([torch.tensor(pipeline.feature_extractor(img, return_tensors="pt")["pixel_values"][0]) for img in images])
+        images = images.to(accelerator.device, dtype=torch.float16)
+
+        # Convert text to input_ids
+        texts = batch["text"]
+        inputs = tokenizer(
+            texts,
+            padding="max_length",
+            max_length=77,
+            truncation=True,
+            return_tensors="pt"
+        ).to(accelerator.device)
+
+        # 1. Get model prediction for the noise
+        noise_pred = pipeline.unet(
+            images,
+            pipeline.scheduler.timesteps[-1], # just an example of single-step
+            encoder_hidden_states=pipeline.text_encoder(inputs.input_ids)[0]
+        ).sample
+
+        # 2. Compute simple loss (L2 between predicted noise and actual noise)
+        # This is a simplified training approach for demonstration
+        with torch.no_grad():
+            noise = torch.randn_like(noise_pred)
+
+        loss = torch.nn.functional.mse_loss(noise_pred, noise)
+
+        # 3. Backprop
+        accelerator.backward(loss)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        global_step += 1
+        if global_step >= NUM_TRAIN_STEPS:
+            break
+    if global_step >= NUM_TRAIN_STEPS:
+        print("Training complete!")
+        break
+
+# -----------------
+# 8. Save LoRA weights
+# -----------------
+accelerator.wait_for_everyone()
+if accelerator.is_main_process:
+    print(f"Saving LoRA weights to {OUTPUT_DIR}...")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    lora_attn_procs.save_pretrained(OUTPUT_DIR)  # just save unet attn procs
+    # If you adapted the text encoder, save that too:
+    # text_encoder_attn_procs.save_pretrained(os.path.join(OUTPUT_DIR, "text_encoder"))
+
+Key points:
+
+    LoRAAttnProcs (from diffusers.optimization) creates LoRA layers for the UNet’s cross-attention.
+    We do a simple training loop with a naive noise prediction objective. (Real training uses a more robust approach, but this is enough for demonstration.)
+    We periodically compare the predicted noise to random noise, backprop through the LoRA parameters, and save the LoRA weights at the end.
+
+3. Minimal Inference/Generation Code
+
+Now, we want to:
+
+    Load the base SDXL model.
+    Load the LoRA weights we saved.
+    Generate images from custom prompts.
+    Refine those images with the XL Refiner.
+
+Create a script, for example, inference_sdxl_lora.py:
+
+#!/usr/bin/env python
+# inference_sdxl_lora.py
+
+import torch
+from diffusers import DiffusionPipeline, DPMSolverMultistepScheduler
+from diffusers.optimization import LoRAAttnProcs
+
+BASE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+REFINER_MODEL = "stabilityai/stable-diffusion-xl-refiner-1.0"
+LORA_WEIGHTS_DIR = "./sdxl-lora-lace"
+
+if __name__ == "__main__":
+    # -----------------
+    # 1. Load Base Pipeline
+    # -----------------
+    base_pipe = DiffusionPipeline.from_pretrained(
+        BASE_MODEL, 
+        torch_dtype=torch.float16
+    )
+    base_pipe.to("cuda")
+
+    # You can switch to a more advanced scheduler for inference
+    base_pipe.scheduler = DPMSolverMultistepScheduler.from_config(base_pipe.scheduler.config)
+
+    # -----------------
+    # 2. Load LoRA Weights
+    # -----------------
+    lora_attn_procs = LoRAAttnProcs.load_pretrained(LORA_WEIGHTS_DIR)
+    base_pipe.unet.set_attn_processor(lora_attn_procs)
+    # If you also adapted a text encoder, load that too
+
+    # -----------------
+    # 3. Generate Images w/ LoRA
+    # -----------------
+    prompt = "A close-up of elegant white lace embroidered fabric, intricate pattern, 8k resolution"
+    negative_prompt = "grainy, low quality"
+
+    # We output latents so we can pass them to the refiner
+    base_latents = base_pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        num_inference_steps=30,
+        output_type="latent"  # get latent representations, not images
+    ).images
+
+    # If you want direct images from base (without refinement), you can do:
+    # base_images = base_pipe(
+    #     prompt=prompt,
+    #     negative_prompt=negative_prompt,
+    #     num_inference_steps=30
+    # ).images
+    # base_images[0].save("base_result.png")
+
+    # -----------------
+    # 4. Refine Using SDXL Refiner
+    # -----------------
+    refiner_pipe = DiffusionPipeline.from_pretrained(
+        REFINER_MODEL,
+        torch_dtype=torch.float16
+    )
+    refiner_pipe.to("cuda")
+    refiner_pipe.scheduler = DPMSolverMultistepScheduler.from_config(refiner_pipe.scheduler.config)
+
+    refined_images = refiner_pipe(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        image=base_latents,
+        num_inference_steps=30
+    ).images
+
+    # Save final results
+    for i, img in enumerate(refined_images):
+        img.save(f"refined_output_{i}.png")
+    print("Refinement done. Check saved images.")
+
+How It Works (Step by Step)
+
+    Load Base Model
+    We load stabilityai/stable-diffusion-xl-base-1.0 with half-precision (torch.float16), then move it to the GPU.
+
+    Load LoRA Weights
+    We fetch the saved attention processors (LoRAAttnProcs) from the directory where we stored them and inject them into the base UNet. This effectively merges the LoRA layers.
+
+    Generate Latents
+    Instead of returning final PIL images, we request output_type="latent" from the base model. This gives us a latent representation of the images.
+
+    Refine with stabilityai/stable-diffusion-xl-refiner-1.0
+    We load a second DiffusionPipeline for the refiner model, pass in the same prompt and the latents from the base step, and let it produce higher-quality final images.
+
+    Save
+    We simply .save(...) the final images as .png.
+
+4. Final Notes
+
+    Hyperparameter Tuning:
+        BATCH_SIZE, LEARNING_RATE, NUM_TRAIN_STEPS, and LORA_RANK are just starting points. Real results might require longer training, a better LR schedule, or different optimizer settings.
+    Text Encoder LoRA:
+        In many advanced LoRA training strategies, you also adapt the text encoder to better align the new concept. Above, we demonstrated only UNet LoRA for simplicity.
+    Refiner Usage:
+        The refiner expects latents (not standard images). By running base_pipe(..., output_type="latent"), you can chain the latents directly into the refiner pipeline.
+    Memory:
+        SDXL is large. If you run out of memory, consider gradient accumulation, smaller batch sizes, or turning on xFormers memory-efficient attention.
+
+This setup should give you the minimal steps for:
+
+    Collecting images
+    Training LoRA on SDXL Base
+    Generating new images with queries
+    Refining them using SDXL Refiner

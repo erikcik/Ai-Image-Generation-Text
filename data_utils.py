@@ -1,27 +1,38 @@
 import os
+import logging
 from pathlib import Path
 from typing import Set, List, Optional
+from PIL import Image
 
-def list_images(image_dir: str, extensions: Optional[Set[str]] = None) -> List[str]:
-    """List all image files in the specified directory with given extensions.
-    
-    Args:
-        image_dir: Path to directory containing images
-        extensions: Set of file extensions to include (default: {".jpg", ".jpeg", ".png"})
-    
-    Returns:
-        Sorted list of image paths
-    """
+def list_images(image_dir: str, extensions: Set[str] = None) -> List[str]:
+    """List all image files with supported extensions in directory."""
     extensions = extensions or {".jpg", ".jpeg", ".png"}
-    if not Path(image_dir).exists():
-        raise FileNotFoundError(f"Image directory {image_dir} does not exist")
-        
-    image_files = []
-    for ext in extensions:
-        image_files.extend(Path(image_dir).glob(f"*{ext.lower()}"))
-        image_files.extend(Path(image_dir).glob(f"*{ext.upper()}"))
+    image_dir = Path(image_dir)
     
-    return [str(f) for f in sorted(set(image_files))]
+    if not image_dir.exists():
+        raise FileNotFoundError(f"Image directory {image_dir} does not exist")
+    
+    images = []
+    for ext in extensions:
+        images.extend(image_dir.glob(f"*{ext}"))
+        images.extend(image_dir.glob(f"*{ext.upper()}"))
+    
+    if not images:
+        raise ValueError(f"No images found in {image_dir} with extensions: {extensions}")
+    
+    return sorted([str(img) for img in images])
+
+def create_annotations(image_dir: str, prompt: str) -> str:
+    """Create simple annotations file with fixed prompt for all images."""
+    images = list_images(image_dir)
+    annotations_path = Path(image_dir) / "annotations.txt"
+    
+    logging.info(f"Creating annotations for {len(images)} images")
+    with open(annotations_path, "w") as f:
+        for img_path in images:
+            f.write(f"{img_path}\t{prompt}\n")
+    
+    return str(annotations_path)
 
 def create_annotations(image_dir: str, instance_prompt: str, class_prompt: Optional[str] = None) -> str:
     """Create annotations file mapping images to prompts.
