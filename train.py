@@ -10,6 +10,8 @@ from data_utils import list_images, create_annotations
 from safetensors.torch import save_file
 from PIL import Image
 import torchvision.transforms as transforms
+import time
+import datetime
 
 class LaceDataset(Dataset):
     def __init__(self, image_dir, instance_prompt, tokenizer, size=512):
@@ -224,11 +226,17 @@ def run(config):
     progress_bar = tqdm(
         total=int(config["max_train_steps"]),
         desc="Training",
-        disable=False
+        disable=False,
+        ncols=100  # Fixed width for cleaner display
     )
+    
     global_step = 0
+    total_loss = 0
+    log_interval = 10  # Update stats every 10 steps
     
     pipeline.unet.train()
+    start_time = time.time()
+    
     try:
         for epoch in range(int(config.get("num_epochs", 1))):
             if global_step >= int(config["max_train_steps"]):
@@ -237,73 +245,53 @@ def run(config):
             for batch in train_dataloader:
                 if global_step >= int(config["max_train_steps"]):
                     break
-                    
-                # Move batch to GPU and convert to float16
-                batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
-                batch["input_ids"] = batch["input_ids"].to(accelerator.device)
                 
-                # Forward pass
-                with torch.no_grad():
-                    latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
-                    noise = torch.randn_like(latents)
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
-                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                    
-                    # Get text embeddings
-                    prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
-                    if prompt_embeds.shape[-1] != 2048:
-                        prompt_embeds = main_proj(prompt_embeds)
-                    
-                    pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
-                    if pooled_prompt_embeds.ndim == 3:
-                        pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
+                # Training step
+                current_loss = train_step(
+                    batch, 
+                    pipeline, 
+                    noise_scheduler, 
+                    optimizer, 
+                    main_proj, 
+                    accelerator, 
+                    config
+                )
                 
-                # Prepare UNet inputs
-                add_time_ids = torch.cat([
-                    torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-                    torch.tensor((0, 0), device=latents.device, dtype=torch.long),
-                    torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-                ]).unsqueeze(0).repeat(latents.shape[0], 1)
+                # Update statistics
+                total_loss += current_loss
                 
-                # UNet forward pass
-                noise_pred = pipeline.unet(
-                    noisy_latents,
-                    timesteps,
-                    prompt_embeds,
-                    added_cond_kwargs={
-                        "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-                        "time_ids": add_time_ids.to(dtype=torch.float16)
-                    }
-                ).sample
+                # Update progress bar every step
+                elapsed = time.time() - start_time
+                steps_per_sec = (global_step + 1) / elapsed
+                remaining_steps = config["max_train_steps"] - global_step - 1
+                eta = remaining_steps / steps_per_sec if steps_per_sec > 0 else 0
                 
-                # Compute loss
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
-                
-                # Skip if loss is NaN
-                if torch.isnan(loss).any() or torch.isinf(loss).any():
-                    continue
-                
-                # Backward pass and optimization
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(trainable_params, config["max_grad_norm"])
-                optimizer.step()
-                optimizer.zero_grad()
-                
-                # Update progress bar with loss
-                progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+                progress_bar.set_postfix({
+                    'loss': f'{current_loss:.4f}',
+                    'step/s': f'{steps_per_sec:.2f}',
+                    'eta': f'{datetime.timedelta(seconds=int(eta))}',
+                })
                 progress_bar.update(1)
+                
+                # Log average loss periodically
+                if (global_step + 1) % log_interval == 0:
+                    avg_loss = total_loss / log_interval
+                    print(f"\nStep {global_step+1}/{config['max_train_steps']}, "
+                          f"Average Loss: {avg_loss:.4f}, "
+                          f"Speed: {steps_per_sec:.2f} steps/s")
+                    total_loss = 0
                 
                 # Save checkpoint
                 if global_step > 0 and global_step % config["save_steps"] == 0:
                     save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
                     os.makedirs(save_path, exist_ok=True)
                     save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+                    print(f"\nSaved checkpoint at step {global_step}")
                 
                 global_step += 1
                 if global_step >= config["max_train_steps"]:
                     break
-                    
+
     except Exception as e:
         print(f"\nTraining interrupted: {str(e)}")
         # Save checkpoint on error
@@ -314,4 +302,60 @@ def run(config):
     
     # Save final weights
     save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
-    print("\nTraining completed successfully!") 
+    print("\nTraining completed successfully!")
+
+def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config):
+    """Single training step"""
+    # Move batch to GPU and convert to float16
+    batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
+    batch["input_ids"] = batch["input_ids"].to(accelerator.device)
+    
+    # Forward pass
+    with torch.no_grad():
+        latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
+        noise = torch.randn_like(latents)
+        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
+        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+        
+        # Get text embeddings
+        prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
+        if prompt_embeds.shape[-1] != 2048:
+            prompt_embeds = main_proj(prompt_embeds)
+        
+        pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
+        if pooled_prompt_embeds.ndim == 3:
+            pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
+    
+    # Prepare UNet inputs
+    add_time_ids = torch.cat([
+        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+        torch.tensor((0, 0), device=latents.device, dtype=torch.long),
+        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+    ]).unsqueeze(0).repeat(latents.shape[0], 1)
+    
+    # UNet forward pass
+    noise_pred = pipeline.unet(
+        noisy_latents,
+        timesteps,
+        prompt_embeds,
+        added_cond_kwargs={
+            "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
+            "time_ids": add_time_ids.to(dtype=torch.float16)
+        }
+    ).sample
+    
+    # Compute loss
+    loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+    
+    # Skip if loss is NaN
+    if torch.isnan(loss).any() or torch.isinf(loss).any():
+        return float('inf')
+    
+    # Backward pass and optimization
+    accelerator.backward(loss)
+    if accelerator.sync_gradients:
+        accelerator.clip_grad_norm_(trainable_params, config["max_grad_norm"])
+    optimizer.step()
+    optimizer.zero_grad()
+    
+    return loss.item() 
