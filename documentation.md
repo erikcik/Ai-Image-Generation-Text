@@ -1,168 +1,139 @@
 # AI Image Generation Model Documentation
 
-## Table of Contents
-- [Environment Setup](#environment-setup)
-- [Configuration](#configuration)
-- [Training](#training)
-- [Inference](#inference)
-- [Troubleshooting](#troubleshooting)
-- [Advanced Usage](#advanced-usage)
+## Overview
+This project implements a Stable Diffusion XL-based image generation system with LoRA fine-tuning, specifically designed for lace embroidered fabric designs.
 
-## Environment Setup <a name="environment-setup"></a>
+## Setup Instructions
 
-### Option 1: Google Colab (Recommended)
-1. Open [Google Colab](https://colab.research.google.com)
-2. Create a new notebook
-3. Upload your project files to Google Drive
-4. In a Colab cell, run:
-```python
-# Mount Google Drive
-from google.colab import drive
-drive.mount('/content/drive')
+### 1. Google Colab Environment Setup
+1. Open Google Colab
+2. Mount Google Drive:
+   ```python
+   from google.colab import drive
+   drive.mount('/content/drive')
+   ```
+3. Install required dependencies:
+   ```bash
+   pip install torch diffusers transformers accelerate wandb
+   ```
 
-# Install dependencies
-!pip install -q diffusers transformers accelerate safetensors
-!pip install -q xformers
-!sudo apt -qq install git-lfs
+### 2. Project Structure
+Place your images in Google Drive (e.g., `/content/drive/MyDrive/babanne-images/`). The project consists of:
+- `config.yaml`: Configuration parameters
+- `main.py`: CLI entry point
+- `train.py`: LoRA training implementation
+- `inference.py`: Image generation and refinement
+- `data_utils.py`: Image processing utilities
 
-# Change to your project directory
-%cd /content/drive/MyDrive/your-project-directory
-
-# Run the script
-!python main.py --mode train  # or inference
-```
-
-### Option 2: Local Setup
-1. Install dependencies:
-```bash
-# Basic dependencies
-pip install diffusers transformers accelerate safetensors
-
-# Optional but recommended for memory efficient training
-pip install xformers
-
-# If xformers installation fails, try:
-pip install -U xformers --index-url https://download.pytorch.org/whl/cu118
-# OR
-pip install -U xformers --index-url https://download.pytorch.org/whl/cu121
-```
-
-2. Create directories:
-```bash
-mkdir -p babanne-images lora_output
-```
-
-3. Update config.yaml:
+### 3. Configuration
+Edit `config.yaml` to set your parameters:
 ```yaml
-drive_mount_path: "./drive"  # This will be ignored in local setup
-images_dir: "./babanne-images"
-lora_output_dir: "./lora_output"
-# ... rest of the config ...
+drive_mount_path: "/content/drive"
+images_dir: "/content/drive/MyDrive/babanne-images"
+lora_output_dir: "/content/drive/MyDrive/lora_output"
+instance_prompt: "a photo of <myspecialstyle>"
+resolution: 512
+train_batch_size: 2
+learning_rate: 1e-4
+max_train_steps: 1000
 ```
 
-4. Place your training images in the `babanne-images` directory
+## Usage Guide
 
-5. Run the script:
-```bash
-python main.py --mode train  # or inference
-```
+### 1. Training Process
+1. Prepare your training images (200-300 .jpg files) in the specified Google Drive folder
+2. Run training:
+   ```bash
+   python main.py --mode train
+   ```
+3. Monitor the training progress in the output log
+4. LoRA weights will be saved to `lora_output_dir`
 
-## Configuration <a name="configuration"></a>
+### 2. Generating Images
+1. Run inference:
+   ```bash
+   python main.py --mode inference
+   ```
+2. Generated images will be:
+   - Created using the base SDXL model with LoRA weights
+   - Refined using the SDXL refiner
+   - Saved to the specified output directory
 
-Edit `config.yaml` with these key parameters:
+### 3. Advanced Configuration
 
-| Parameter | Description | Example Value |
-|-----------|-------------|---------------|
-| `images_dir` | Path to training images | `/content/drive/MyDrive/babanne-images` |
-| `instance_prompt` | Unique concept token prompt | `"a photo of <myspecialstyle>"` |
-| `pretrained_model` | Base SDXL model | `"stabilityai/stable-diffusion-xl-base-1.0"` |
-| `train_batch_size` | Training batch size | `2` |
-| `max_train_steps` | Training iterations | `1000` |
+#### Training Parameters
+- `train_batch_size`: Adjust based on available GPU memory
+- `learning_rate`: Default 1e-4, adjust if training is unstable
+- `max_train_steps`: Increase for better results, decrease for faster training
 
-**Important:** Keep the `<myspecialstyle>` token in prompts for proper LoRA training.
+#### Inference Parameters
+- `num_inference_steps`: More steps = better quality but slower
+- `guidance_scale`: Higher values = stronger adherence to prompt
+- `refiner_strength`: Controls refinement intensity (0.0-1.0)
 
-## Training <a name="training"></a>
-
-### Starting Training
-```bash
-python main.py --mode train
-```
-
-**Process Flow:**
-1. Mounts Google Drive
-2. Processes images from `images_dir`
-3. Creates annotation files
-4. Trains LoRA adapters
-5. Saves weights to `lora_output_dir`
-
-## Inference <a name="inference"></a>
-
-### Generating Images
-```bash
-python main.py --mode inference
-```
-
-**Generation Pipeline:**
-1. Loads base SDXL model with LoRA weights
-2. Generates initial image
-3. Refines output with SDXL Refiner
-4. Saves final image to `lora_output_dir/refined_output.png`
-
-## Troubleshooting <a name="troubleshooting"></a>
+## Troubleshooting
 
 ### Common Issues
 
-**'NoneType' object has no attribute 'kernel' Error**
-- This error occurs when running the script directly instead of in Colab
-- Solution: Either:
-  1. Run in Google Colab (recommended)
-  2. Update config.yaml to use local paths
-  
-**CUDA Out of Memory**
-- Reduce `train_batch_size` in config
-- Use `resolution: 512` instead of higher values
+1. Out of Memory (OOM) Errors
+   - Reduce `train_batch_size`
+   - Enable gradient checkpointing
+   - Use mixed precision training
 
-**Missing Dependencies**
-```bash
-# Update packages
-!pip install --upgrade diffusers transformers accelerate
-```
+2. Image Quality Issues
+   - Increase `num_inference_steps`
+   - Adjust `guidance_scale`
+   - Try different `refiner_strength` values
 
-**Model Loading Errors**
-- Verify model paths in config
-- Check available disk space on Google Drive
+3. Training Problems
+   - Check image format compatibility
+   - Verify prompt formatting
+   - Ensure proper Google Drive mounting
 
-**Xformers Installation Error**
-- Error message: "Unable to register cuFFT factory" or xformers related errors
-- Solutions:
-  1. Install xformers manually: `pip install xformers`
-  2. If that fails, try installing with CUDA version specific index:
-     ```bash
-     pip install -U xformers --index-url https://download.pytorch.org/whl/cu118
-     ```
-  3. If xformers cannot be installed, the model will still work but may use more memory
+### Error Messages
 
-## Advanced Usage <a name="advanced-usage"></a>
+1. "CUDA out of memory"
+   - Solution: Reduce batch size or image resolution
 
-### Custom Prompts
-```yaml
-# In config.yaml
-instance_prompt: "a detailed embroidery pattern of <myspecialstyle> on fabric"
-```
+2. "No such file or directory"
+   - Check Google Drive paths
+   - Verify file permissions
 
-### LoRA Parameters
-```yaml
-# Add to config.yaml for advanced control
-lora_rank: 8       # Higher values increase model flexibility
-lora_alpha: 64     # Scales LoRA contribution
-```
+3. "Failed to load LoRA weights"
+   - Ensure training completed successfully
+   - Check path to LoRA weights
 
-### Multi-GPU Training
-```python
-# Launch with Accelerate
-!accelerate config  # Set up distributed training
-!accelerate launch train.py
-```
+## Best Practices
 
-### Output Samples
-![Sample Output](https://via.placeholder.com/512x512.png?text=Embroidery+Sample) 
+1. Image Preparation
+   - Use high-quality source images
+   - Maintain consistent image sizes
+   - Ensure proper file formats (.jpg preferred)
+
+2. Training
+   - Start with default parameters
+   - Monitor training loss
+   - Save checkpoints regularly
+
+3. Inference
+   - Test different prompt variations
+   - Experiment with guidance scales
+   - Use batch processing for multiple images
+
+## Performance Optimization
+
+1. Training Speed
+   - Use mixed precision training
+   - Enable gradient checkpointing
+   - Optimize batch size
+
+2. Memory Usage
+   - Monitor GPU memory
+   - Clean cache between generations
+   - Use appropriate precision settings
+
+## Support and Resources
+
+- Diffusers Documentation: [Hugging Face Diffusers](https://huggingface.co/docs/diffusers)
+- SDXL Documentation: [Stability AI](https://stability.ai/stable-diffusion)
+- LoRA Paper: [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685) 

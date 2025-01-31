@@ -5,44 +5,13 @@ instance_prompt: "a photo of <myspecialstyle>"
 class_prompt: "a photo of a painting"
 pretrained_model: "stabilityai/stable-diffusion-xl-base-1.0"
 refiner_model: "stabilityai/stable-diffusion-xl-refiner-1.0"
-resolution: 1024
+resolution: 512
 train_batch_size: 2
 learning_rate: 1e-4
-max_train_steps: 1000        # Total number of training steps
+max_train_steps: 1000
 num_inference_steps: 30
 guidance_scale: 7.5
 refiner_steps: 20
 refiner_strength: 0.3
 refiner_guidance: 7.5
-output_format: "png"
-
-# LoRA specific parameters
-lora_rank: 8
-lora_alpha: 16
-save_steps: 50
-num_epochs: 1
-use_wandb: false  # Set to true if using Weights & Biases logging
-
-# Add these debug parameters
-debug_mode: false           # Disable debug output
-print_frequency: 100         # Reduce output frequency
-
-# Add these parameters
-text_encoder_projection: true
-projection_scale: 0.02      # Increased slightly
-main_embed_dim: 2048          # Target dimension for main embeddings
-pooled_embed_dim: 1280        # Target dimension for pooled embeddings
-
-# Training stability parameters
-max_grad_norm: 0.5
-optimizer_eps: 1e-8
-weight_decay: 0.01
-warmup_steps: 100
-
-# Mixed precision parameters
-mixed_precision: "fp16"
-enable_gradient_scaling: true
-
-# Add validation parameters
-validation_steps: 100
-validation_prompts: ["a photo of <myspecialstyle> embroidery on white fabric"] 
+output_format: "png" 

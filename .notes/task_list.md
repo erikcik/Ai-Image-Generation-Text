@@ -2,6 +2,7 @@
 
 ## High Priority
 - [ ] Add validation and checkpoint saving (**Status:** To Do)
+- [ ] Implement comprehensive error handling (**Status:** To Do)
 
 ## Medium Priority
 - [ ] Add batch processing for inference (**Status:** To Do)
@@ -15,5 +16,5 @@
 - [x] Implement core data utilities
 - [x] Implement LoRA training pipeline
 - [x] Implement inference and refinement system
-- [x] Create comprehensive documentation (**Notes:** Full user/developer docs in documentation.md)
-- [x] Basic error handling and resource management 
+- [x] Basic error handling and resource management
+- [x] Create comprehensive documentation (**Notes:** Added detailed setup, usage, and troubleshooting guides) 
