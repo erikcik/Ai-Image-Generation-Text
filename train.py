@@ -308,23 +308,25 @@ def run(config):
     print("\nTraining completed successfully!")
 
 def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config):
-    """Single training step"""
+    """Single training step with improved stability"""
     try:
         # Move batch to GPU and convert to float16
         batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
         batch["input_ids"] = batch["input_ids"].to(accelerator.device)
         
-        # Forward pass
+        # Forward pass with scaled inputs
         with torch.no_grad():
+            # Scale inputs to prevent numerical instability
             latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
             noise = torch.randn_like(latents)
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            # Get text embeddings with gradient scaling
+            # Get text embeddings with careful scaling
             prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
             if prompt_embeds.shape[-1] != 2048:
-                prompt_embeds = main_proj(prompt_embeds) * 0.1  # Scale down projections
+                # Use smaller scaling factor
+                prompt_embeds = main_proj(prompt_embeds) * 0.01
             
             pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
             if pooled_prompt_embeds.ndim == 3:
@@ -337,7 +339,7 @@ def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerat
             torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
         ]).unsqueeze(0).repeat(latents.shape[0], 1)
         
-        # UNet forward pass with gradient scaling
+        # UNet forward pass with scaled inputs
         noise_pred = pipeline.unet(
             noisy_latents,
             timesteps,
@@ -348,41 +350,63 @@ def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerat
             }
         ).sample
         
-        # Compute loss with scaling
-        loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+        # Compute loss with careful scaling
+        loss = torch.nn.functional.mse_loss(
+            noise_pred.float(),
+            noise.float(),
+            reduction="mean"
+        )
         
-        # Skip if loss is NaN or inf
-        if torch.isnan(loss).any() or torch.isinf(loss).any():
-            return 999.0  # Return high but finite loss instead of inf
+        # Only skip if loss is actually infinite
+        if torch.isinf(loss).any():
+            return 100.0  # Use a smaller fallback value
         
-        # Backward pass and optimization with gradient clipping
+        # Scale loss for stability
+        loss = loss * 0.5  # Reduce loss magnitude
+        
+        # Backward pass with scaled gradients
         accelerator.backward(loss)
+        
+        # Clip gradients more aggressively
         if accelerator.sync_gradients:
             torch.nn.utils.clip_grad_norm_(trainable_params, config["max_grad_norm"])
         
-        # Check gradients before optimizer step
-        valid_gradients = True
-        for param in trainable_params:
-            if param.grad is not None:
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    valid_gradients = False
-                    break
+        # Update weights
+        optimizer.step()
+        optimizer.zero_grad()
         
-        if valid_gradients:
-            optimizer.step()
-            optimizer.zero_grad()
-            return loss.item()
-        else:
-            optimizer.zero_grad()
-            return 999.0  # Return high but finite loss
+        return loss.item()
             
     except Exception as e:
         print(f"Error in training step: {str(e)}")
-        return 999.0  # Return high but finite loss
+        return 100.0  # Use a smaller fallback value
 
 def validate_checkpoint(lora_state_dict):
     """Validate LoRA weights before saving"""
-    for name, tensor in lora_state_dict.items():
-        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+    try:
+        # Check if weights exist
+        if not lora_state_dict:
+            print("Empty LoRA state dict")
             return False
-    return True 
+            
+        # Validate each tensor
+        for name, tensor in lora_state_dict.items():
+            # Check for NaN or Inf
+            if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+                print(f"Invalid values in {name}")
+                return False
+            
+            # Check for zero tensors
+            if torch.all(tensor == 0):
+                print(f"All zeros in {name}")
+                return False
+                
+            # Check for reasonable magnitudes
+            if torch.abs(tensor).max() > 100:
+                print(f"Large values in {name}")
+                return False
+                
+        return True
+    except Exception as e:
+        print(f"Error validating checkpoint: {str(e)}")
+        return False 

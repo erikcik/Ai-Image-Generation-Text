@@ -7,7 +7,7 @@ pretrained_model: "stabilityai/stable-diffusion-xl-base-1.0"
 refiner_model: "stabilityai/stable-diffusion-xl-refiner-1.0"
 resolution: 1024
 train_batch_size: 1
-learning_rate: 1e-6
+learning_rate: 1e-7
 max_train_steps: 1000        # Total number of training steps
 num_inference_steps: 30
 guidance_scale: 7.5
@@ -18,9 +18,9 @@ output_format: "png"
 
 # LoRA specific parameters
 lora_rank: 4
-lora_alpha: 16
-save_steps: 100
-num_epochs: 1                # Limit epochs to avoid infinite loop
+lora_alpha: 8
+save_steps: 50
+num_epochs: 1
 use_wandb: false  # Set to true if using Weights & Biases logging
 
 # Add these debug parameters
@@ -28,11 +28,12 @@ debug_mode: false           # Disable debug output
 print_frequency: 100         # Reduce output frequency
 
 # Add these parameters
-text_encoder_projection: true  # Enable text encoder projection
+text_encoder_projection: true
+projection_scale: 0.01
 main_embed_dim: 2048          # Target dimension for main embeddings
 pooled_embed_dim: 1280        # Target dimension for pooled embeddings
 
 # Training stability parameters
-max_grad_norm: 0.5
+max_grad_norm: 0.1
 optimizer_eps: 1e-8
 enable_gradient_clipping: true 
