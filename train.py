@@ -287,36 +287,49 @@ def initialize_lora(pipeline, config):
     lora_state_dict = {}
     found_modules = 0
     
-    for name, module in pipeline.unet.named_modules():
-        if any(target in name for target in ["to_q", "to_k", "to_v", "to_out.0"]):
-            if hasattr(module, "weight"):
-                in_features = module.in_features
-                out_features = module.out_features
-                
-                # Initialize LoRA weights with proper initialization
-                lora_down = torch.nn.Linear(in_features, config["lora_rank"], bias=False)
-                lora_up = torch.nn.Linear(config["lora_rank"], out_features, bias=False)
-                
-                # Xavier initialization
-                torch.nn.init.xavier_uniform_(lora_down.weight)
-                torch.nn.init.zeros_(lora_up.weight)
-                
-                # Move to device and set dtype
-                lora_down = lora_down.to(device=module.weight.device, dtype=torch.float16)
-                lora_up = lora_up.to(device=module.weight.device, dtype=torch.float16)
-                
-                # Register parameters
-                module.lora_down = lora_down
-                module.lora_up = lora_up
-                
-                # Store references for training
-                lora_state_dict[f"{name}.lora_down.weight"] = lora_down.weight
-                lora_state_dict[f"{name}.lora_up.weight"] = lora_up.weight
-                
-                found_modules += 1
-                print(f"Initialized LoRA for {name}")
+    # Keep track of processed modules to avoid recursion
+    processed_modules = set()
     
-    print(f"Initialized {found_modules} LoRA modules")
+    for name, module in pipeline.unet.named_modules():
+        # Skip if already processed
+        if name in processed_modules:
+            continue
+            
+        # Only process direct attention modules
+        if any(target in name.split(".")[-1] for target in ["to_q", "to_k", "to_v", "to_out.0"]):
+            if hasattr(module, "weight"):
+                try:
+                    in_features = module.weight.shape[1]
+                    out_features = module.weight.shape[0]
+                    
+                    # Initialize LoRA weights with proper initialization
+                    lora_down = torch.nn.Linear(in_features, config["lora_rank"], bias=False)
+                    lora_up = torch.nn.Linear(config["lora_rank"], out_features, bias=False)
+                    
+                    # Xavier initialization
+                    torch.nn.init.xavier_uniform_(lora_down.weight)
+                    torch.nn.init.zeros_(lora_up.weight)
+                    
+                    # Move to device and set dtype
+                    lora_down = lora_down.to(device=module.weight.device, dtype=torch.float16)
+                    lora_up = lora_up.to(device=module.weight.device, dtype=torch.float16)
+                    
+                    # Store weights in state dict
+                    lora_state_dict[f"{name}.lora_down.weight"] = lora_down.weight
+                    lora_state_dict[f"{name}.lora_up.weight"] = lora_up.weight
+                    
+                    # Mark as processed
+                    processed_modules.add(name)
+                    found_modules += 1
+                    
+                    if found_modules % 10 == 0:  # Print progress less frequently
+                        print(f"Initialized {found_modules} LoRA modules...")
+                        
+                except Exception as e:
+                    print(f"Skipping module {name}: {str(e)}")
+                    continue
+    
+    print(f"\nCompleted LoRA initialization with {found_modules} modules")
     return lora_state_dict
 
 def save_lora_weights(pipeline, output_dir, global_step=None):
