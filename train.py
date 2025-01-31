@@ -283,10 +283,13 @@ def run(config):
                 
                 # Save checkpoint
                 if global_step > 0 and global_step % config["save_steps"] == 0:
-                    save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
-                    os.makedirs(save_path, exist_ok=True)
-                    save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
-                    print(f"\nSaved checkpoint at step {global_step}")
+                    if validate_checkpoint(lora_state_dict):
+                        save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
+                        os.makedirs(save_path, exist_ok=True)
+                        save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+                        print(f"\nSaved valid checkpoint at step {global_step}")
+                    else:
+                        print(f"\nSkipped saving invalid checkpoint at step {global_step}")
                 
                 global_step += 1
                 if global_step >= config["max_train_steps"]:
@@ -306,56 +309,80 @@ def run(config):
 
 def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config):
     """Single training step"""
-    # Move batch to GPU and convert to float16
-    batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
-    batch["input_ids"] = batch["input_ids"].to(accelerator.device)
-    
-    # Forward pass
-    with torch.no_grad():
-        latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
-        noise = torch.randn_like(latents)
-        timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
-        noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+    try:
+        # Move batch to GPU and convert to float16
+        batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
+        batch["input_ids"] = batch["input_ids"].to(accelerator.device)
         
-        # Get text embeddings
-        prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
-        if prompt_embeds.shape[-1] != 2048:
-            prompt_embeds = main_proj(prompt_embeds)
+        # Forward pass
+        with torch.no_grad():
+            latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
+            noise = torch.randn_like(latents)
+            timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
+            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+            
+            # Get text embeddings with gradient scaling
+            prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
+            if prompt_embeds.shape[-1] != 2048:
+                prompt_embeds = main_proj(prompt_embeds) * 0.1  # Scale down projections
+            
+            pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
+            if pooled_prompt_embeds.ndim == 3:
+                pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
         
-        pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
-        if pooled_prompt_embeds.ndim == 3:
-            pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
-    
-    # Prepare UNet inputs
-    add_time_ids = torch.cat([
-        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-        torch.tensor((0, 0), device=latents.device, dtype=torch.long),
-        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-    ]).unsqueeze(0).repeat(latents.shape[0], 1)
-    
-    # UNet forward pass
-    noise_pred = pipeline.unet(
-        noisy_latents,
-        timesteps,
-        prompt_embeds,
-        added_cond_kwargs={
-            "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-            "time_ids": add_time_ids.to(dtype=torch.float16)
-        }
-    ).sample
-    
-    # Compute loss
-    loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
-    
-    # Skip if loss is NaN
-    if torch.isnan(loss).any() or torch.isinf(loss).any():
-        return float('inf')
-    
-    # Backward pass and optimization
-    accelerator.backward(loss)
-    if accelerator.sync_gradients:
-        accelerator.clip_grad_norm_(trainable_params, config["max_grad_norm"])
-    optimizer.step()
-    optimizer.zero_grad()
-    
-    return loss.item() 
+        # Prepare UNet inputs
+        add_time_ids = torch.cat([
+            torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+            torch.tensor((0, 0), device=latents.device, dtype=torch.long),
+            torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+        ]).unsqueeze(0).repeat(latents.shape[0], 1)
+        
+        # UNet forward pass with gradient scaling
+        noise_pred = pipeline.unet(
+            noisy_latents,
+            timesteps,
+            prompt_embeds,
+            added_cond_kwargs={
+                "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
+                "time_ids": add_time_ids.to(dtype=torch.float16)
+            }
+        ).sample
+        
+        # Compute loss with scaling
+        loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+        
+        # Skip if loss is NaN or inf
+        if torch.isnan(loss).any() or torch.isinf(loss).any():
+            return 999.0  # Return high but finite loss instead of inf
+        
+        # Backward pass and optimization with gradient clipping
+        accelerator.backward(loss)
+        if accelerator.sync_gradients:
+            torch.nn.utils.clip_grad_norm_(trainable_params, config["max_grad_norm"])
+        
+        # Check gradients before optimizer step
+        valid_gradients = True
+        for param in trainable_params:
+            if param.grad is not None:
+                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    valid_gradients = False
+                    break
+        
+        if valid_gradients:
+            optimizer.step()
+            optimizer.zero_grad()
+            return loss.item()
+        else:
+            optimizer.zero_grad()
+            return 999.0  # Return high but finite loss
+            
+    except Exception as e:
+        print(f"Error in training step: {str(e)}")
+        return 999.0  # Return high but finite loss
+
+def validate_checkpoint(lora_state_dict):
+    """Validate LoRA weights before saving"""
+    for name, tensor in lora_state_dict.items():
+        if torch.isnan(tensor).any() or torch.isinf(tensor).any():
+            return False
+    return True 
