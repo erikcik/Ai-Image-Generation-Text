@@ -221,136 +221,97 @@ def run(config):
     )
     
     # Training loop
-    progress_bar = tqdm(range(int(config["max_train_steps"])))
+    progress_bar = tqdm(
+        total=int(config["max_train_steps"]),
+        desc="Training",
+        disable=False
+    )
     global_step = 0
     
     pipeline.unet.train()
-    for epoch in range(int(config.get("num_epochs", 1))):
-        for batch in train_dataloader:
+    try:
+        for epoch in range(int(config.get("num_epochs", 1))):
             if global_step >= int(config["max_train_steps"]):
                 break
                 
-            # Move batch to GPU and convert to float16
-            batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
-            batch["input_ids"] = batch["input_ids"].to(accelerator.device)
-            
-            # Forward pass
-            try:
-                # Debug shapes at each step
-                print("\nDebug Shapes:")
-                
-                # 1. Encode images
-                with torch.no_grad():
-                    latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample()
-                    latents = latents * 0.18215
-                
-                # 2. Add noise
-                noise = torch.randn_like(latents)
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],),
-                    device=latents.device
-                )
-                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
-                
-                # 3. Get text embeddings
-                with torch.no_grad():
-                    # Text encoder 1 (main)
-                    prompt_embeds = pipeline.text_encoder(
-                        batch["input_ids"],
-                        output_hidden_states=True,
-                        return_dict=True
-                    ).hidden_states[-2]
+            for batch in train_dataloader:
+                if global_step >= int(config["max_train_steps"]):
+                    break
                     
-                    # Project main embeddings using the static projection
+                # Move batch to GPU and convert to float16
+                batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
+                batch["input_ids"] = batch["input_ids"].to(accelerator.device)
+                
+                # Forward pass
+                with torch.no_grad():
+                    latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
+                    noise = torch.randn_like(latents)
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=latents.device)
+                    noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                    
+                    # Get text embeddings
+                    prompt_embeds = pipeline.text_encoder(batch["input_ids"], output_hidden_states=True).hidden_states[-2]
                     if prompt_embeds.shape[-1] != 2048:
                         prompt_embeds = main_proj(prompt_embeds)
                     
-                    # Text encoder 2 (pooled)
-                    pooled_prompt_embeds = pipeline.text_encoder_2(
-                        batch["input_ids"],
-                        output_hidden_states=True,
-                        return_dict=True
-                    ).last_hidden_state
-                    
-                    # Mean pool if needed
+                    pooled_prompt_embeds = pipeline.text_encoder_2(batch["input_ids"], output_hidden_states=True).last_hidden_state
                     if pooled_prompt_embeds.ndim == 3:
                         pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
                 
-                # 4. Create time embeddings
-                orig_size = (int(config["resolution"]), int(config["resolution"]))
-                target_size = (int(config["resolution"]), int(config["resolution"]))
-                crops_coords_top_left = (0, 0)
-                
+                # Prepare UNet inputs
                 add_time_ids = torch.cat([
-                    torch.tensor(orig_size, device=latents.device, dtype=torch.long),
-                    torch.tensor(crops_coords_top_left, device=latents.device, dtype=torch.long),
-                    torch.tensor(target_size, device=latents.device, dtype=torch.long),
+                    torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+                    torch.tensor((0, 0), device=latents.device, dtype=torch.long),
+                    torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
                 ]).unsqueeze(0).repeat(latents.shape[0], 1)
                 
-                # 5. Prepare final inputs for UNet
-                added_cond_kwargs = {
-                    "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-                    "time_ids": add_time_ids.to(dtype=torch.float16)
-                }
-                
-                # Print shapes before UNet
-                print("\nFinal shapes before UNet:")
-                print(f"Noisy latents: {noisy_latents.shape}")
-                print(f"Timesteps: {timesteps.shape}")
-                print(f"Prompt embeds: {prompt_embeds.shape}")
-                print(f"Text embeds: {added_cond_kwargs['text_embeds'].shape}")
-                print(f"Time ids: {added_cond_kwargs['time_ids'].shape}")
-                
-                # 6. UNet forward pass
+                # UNet forward pass
                 noise_pred = pipeline.unet(
                     noisy_latents,
                     timesteps,
                     prompt_embeds,
-                    added_cond_kwargs=added_cond_kwargs
+                    added_cond_kwargs={
+                        "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
+                        "time_ids": add_time_ids.to(dtype=torch.float16)
+                    }
                 ).sample
-                print(f"\nPredicted noise shape: {noise_pred.shape}")
                 
-                # 7. Compute loss with scaling
+                # Compute loss
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
                 
-                # Check for NaN loss
+                # Skip if loss is NaN
                 if torch.isnan(loss).any() or torch.isinf(loss).any():
-                    print("\n=== Warning: NaN or Inf loss detected! ===")
-                    print(f"Noise pred stats: min={noise_pred.min()}, max={noise_pred.max()}, mean={noise_pred.mean()}")
-                    print(f"Target noise stats: min={noise.min()}, max={noise.max()}, mean={noise.mean()}")
-                    # Skip this batch
                     continue
                 
-                # 8. Backward pass with gradient clipping
+                # Backward pass and optimization
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(trainable_params, max_grad_norm)
-                
+                    accelerator.clip_grad_norm_(trainable_params, config["max_grad_norm"])
                 optimizer.step()
                 optimizer.zero_grad()
                 
-                if global_step % config.get("print_frequency", 10) == 0:
-                    print(f"\nStep {global_step}: Loss = {loss.item():.4f}")
+                # Update progress bar with loss
+                progress_bar.set_postfix({"loss": f"{loss.item():.4f}"})
+                progress_bar.update(1)
                 
-            except RuntimeError as e:
-                print("\n=== Error Details ===")
-                print(f"Error: {str(e)}")
-                print("\nDebug Information:")
-                print(f"Current loss: {loss.item() if 'loss' in locals() else 'Not computed'}")
-                print(f"Gradient norm: {torch.nn.utils.clip_grad_norm_(trainable_params, float('inf'))}")
-                raise e
-            
-            # Save checkpoint
-            if global_step > 0 and global_step % int(config.get("save_steps", 500)) == 0:
-                print(f"\nSaving checkpoint at step {global_step}")
-                save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
-                os.makedirs(save_path, exist_ok=True)
-                save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
-            
-            progress_bar.update(1)
-            global_step += 1
+                # Save checkpoint
+                if global_step > 0 and global_step % config["save_steps"] == 0:
+                    save_path = os.path.join(config["lora_output_dir"], f"checkpoint-{global_step}")
+                    os.makedirs(save_path, exist_ok=True)
+                    save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+                
+                global_step += 1
+                if global_step >= config["max_train_steps"]:
+                    break
+                    
+    except Exception as e:
+        print(f"\nTraining interrupted: {str(e)}")
+        # Save checkpoint on error
+        save_path = os.path.join(config["lora_output_dir"], f"checkpoint-interrupted")
+        os.makedirs(save_path, exist_ok=True)
+        save_file(lora_state_dict, os.path.join(save_path, "pytorch_lora_weights.safetensors"))
+        raise e
     
     # Save final weights
-    print(f"Saving final LoRA weights to {config['lora_output_dir']}")
     save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
-    print("Training completed successfully!") 
+    print("\nTraining completed successfully!") 
