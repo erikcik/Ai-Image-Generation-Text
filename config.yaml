@@ -7,7 +7,7 @@ pretrained_model: "stabilityai/stable-diffusion-xl-base-1.0"
 refiner_model: "stabilityai/stable-diffusion-xl-refiner-1.0"
 resolution: 1024
 train_batch_size: 1
-learning_rate: 1e-7
+learning_rate: 1e-5
 max_train_steps: 1000        # Total number of training steps
 num_inference_steps: 30
 guidance_scale: 7.5
@@ -32,6 +32,13 @@ text_encoder_projection: true
 projection_scale: 0.01
 main_embed_dim: 2048          # Target dimension for main embeddings
 pooled_embed_dim: 1280        # Target dimension for pooled embeddings
+
+# Training stability parameters
+max_grad_norm: 1.0
+optimizer_eps: 1e-8
+enable_gradient_clipping: true
+weight_decay: 1e-2
+warmup_steps: 100
 
 # Training stability parameters
 max_grad_norm: 0.1
