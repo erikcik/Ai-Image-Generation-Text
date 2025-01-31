@@ -115,49 +115,7 @@ def run(config):
     
     # Initialize LoRA weights
     print("Initializing LoRA weights...")
-    lora_state_dict = {}
-    found_modules = 0
-    
-    for name, module in pipeline.unet.named_modules():
-        if any(target in name for target in lora_config["target_modules"]):
-            try:
-                if hasattr(module, 'in_features'):
-                    in_features = module.in_features
-                    out_features = module.out_features
-                elif hasattr(module, 'weight'):
-                    in_features = module.weight.shape[1]
-                    out_features = module.weight.shape[0]
-                else:
-                    continue
-                
-                print(f"Adding LoRA to layer: {name} ({in_features} -> {out_features})")
-                
-                # Initialize LoRA weights in float16
-                lora_down = torch.zeros((lora_config["r"], in_features), 
-                                     dtype=torch.float16, 
-                                     requires_grad=True)
-                lora_up = torch.zeros((out_features, lora_config["r"]), 
-                                    dtype=torch.float16,
-                                    requires_grad=True)
-                
-                # Initialize with small random values
-                torch.nn.init.kaiming_uniform_(lora_down)
-                torch.nn.init.zeros_(lora_up)
-                
-                lora_state_dict[f"{name}.lora_down.weight"] = lora_down
-                lora_state_dict[f"{name}.lora_up.weight"] = lora_up
-                lora_state_dict[f"{name}.alpha"] = torch.tensor(lora_config["alpha"], 
-                                                              dtype=torch.float16)
-                
-                found_modules += 1
-            except Exception as e:
-                print(f"Warning: Error initializing LoRA for {name}: {str(e)}")
-                continue
-    
-    print(f"Found and initialized {found_modules} modules for LoRA training")
-    
-    if found_modules == 0:
-        raise ValueError("No suitable attention modules found for LoRA training")
+    lora_state_dict = initialize_lora(pipeline, config)
     
     # Configure training parameters
     trainable_params = []
@@ -166,7 +124,7 @@ def run(config):
             trainable_params.append(param)
     
     if not trainable_params:
-        raise ValueError(f"No trainable parameters found. Modules found: {found_modules}")
+        raise ValueError(f"No trainable parameters found. Modules found: {len(lora_state_dict)}")
     
     print(f"Number of trainable parameters: {len(trainable_params)}")
     
@@ -266,7 +224,8 @@ def run(config):
                     main_proj, 
                     accelerator, 
                     config,
-                    trainable_params  # Pass trainable_params here
+                    trainable_params,
+                    scaler
                 )
                 
                 # Update statistics
@@ -319,15 +278,49 @@ def run(config):
     save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
     print("\nTraining completed successfully!")
 
-def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config, trainable_params):
+def initialize_lora(pipeline, config):
+    """Initialize LoRA weights properly"""
+    lora_state_dict = {}
+    found_modules = 0
+    
+    for name, module in pipeline.unet.named_modules():
+        if any(target in name for target in ["to_q", "to_k", "to_v", "to_out.0"]):
+            if hasattr(module, "weight"):
+                in_features = module.weight.shape[1]
+                out_features = module.weight.shape[0]
+                
+                # Initialize LoRA weights with small random values
+                lora_down = torch.randn((config["lora_rank"], in_features), 
+                                     dtype=torch.float16, 
+                                     device=module.weight.device) * 0.02
+                lora_up = torch.randn((out_features, config["lora_rank"]), 
+                                    dtype=torch.float16,
+                                    device=module.weight.device) * 0.02
+                
+                # Scale weights based on rank
+                scaling = float(config["lora_alpha"]) / config["lora_rank"]
+                lora_down.requires_grad_(True)
+                lora_up.requires_grad_(True)
+                
+                lora_state_dict[f"{name}.lora_down.weight"] = lora_down
+                lora_state_dict[f"{name}.lora_up.weight"] = lora_up
+                lora_state_dict[f"{name}.alpha"] = torch.tensor(scaling)
+                
+                found_modules += 1
+                print(f"Initialized LoRA for {name}: {in_features} -> {config['lora_rank']} -> {out_features}")
+    
+    print(f"Initialized {found_modules} LoRA modules")
+    return lora_state_dict
+
+def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config, trainable_params, scaler):
     """Single training step with improved stability"""
     try:
         # Move batch to GPU and convert to float16
         batch["pixel_values"] = batch["pixel_values"].to(accelerator.device, dtype=torch.float16)
         batch["input_ids"] = batch["input_ids"].to(accelerator.device)
         
-        # Forward pass
-        with torch.cuda.amp.autocast():  # Use automatic mixed precision
+        # Forward pass with gradient scaling
+        with torch.amp.autocast('cuda'):
             # Get latents
             latents = pipeline.vae.encode(batch["pixel_values"]).latent_dist.sample() * 0.18215
             noise = torch.randn_like(latents)
@@ -343,13 +336,6 @@ def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerat
             if pooled_prompt_embeds.ndim == 3:
                 pooled_prompt_embeds = pooled_prompt_embeds.mean(dim=1)
             
-            # Prepare UNet inputs
-            add_time_ids = torch.cat([
-                torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-                torch.tensor((0, 0), device=latents.device, dtype=torch.long),
-                torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
-            ]).unsqueeze(0).repeat(latents.shape[0], 1)
-            
             # UNet forward pass
             noise_pred = pipeline.unet(
                 noisy_latents,
@@ -357,7 +343,11 @@ def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerat
                 prompt_embeds,
                 added_cond_kwargs={
                     "text_embeds": pooled_prompt_embeds.to(dtype=torch.float16),
-                    "time_ids": add_time_ids.to(dtype=torch.float16)
+                    "time_ids": torch.cat([
+                        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+                        torch.tensor((0, 0), device=latents.device, dtype=torch.long),
+                        torch.tensor((config["resolution"], config["resolution"]), device=latents.device, dtype=torch.long),
+                    ]).unsqueeze(0).repeat(latents.shape[0], 1).to(dtype=torch.float16)
                 }
             ).sample
             
@@ -367,38 +357,33 @@ def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerat
         # Skip bad losses
         if torch.isnan(loss).any() or torch.isinf(loss).any():
             optimizer.zero_grad()
-            return 100.0
+            return float('inf')
         
-        # Backward pass
-        accelerator.backward(loss)
+        # Backward pass with gradient scaling
+        scaler.scale(loss).backward()
         
-        # Gradient clipping
-        if accelerator.sync_gradients:
-            grad_norm = accelerator.clip_grad_norm_(trainable_params, config["max_grad_norm"])
-            if grad_norm.isnan() or grad_norm.isinf():
-                optimizer.zero_grad()
-                return 100.0
+        # Unscale gradients for clipping
+        scaler.unscale_(optimizer)
         
-        # Check gradients before updating
-        valid_gradients = True
-        for param in trainable_params:
-            if param.grad is not None:
-                if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                    valid_gradients = False
-                    break
+        # Clip gradients
+        grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, config["max_grad_norm"])
         
-        if valid_gradients:
-            optimizer.step()
+        # Skip step if gradients are invalid
+        if grad_norm.isnan() or grad_norm.isinf():
             optimizer.zero_grad()
-            return loss.item()
-        else:
-            optimizer.zero_grad()
-            return 100.0
+            return float('inf')
+        
+        # Update weights with gradient scaling
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+        
+        return loss.item()
             
     except Exception as e:
         print(f"Error in training step: {str(e)}")
         optimizer.zero_grad()
-        return 100.0
+        return float('inf')
 
 def validate_checkpoint(lora_state_dict):
     """Validate LoRA weights before saving"""
