@@ -246,7 +246,7 @@ def run(config):
                 if global_step >= int(config["max_train_steps"]):
                     break
                 
-                # Training step
+                # Training step with trainable_params
                 current_loss = train_step(
                     batch, 
                     pipeline, 
@@ -254,7 +254,8 @@ def run(config):
                     optimizer, 
                     main_proj, 
                     accelerator, 
-                    config
+                    config,
+                    trainable_params  # Pass trainable_params here
                 )
                 
                 # Update statistics
@@ -307,7 +308,7 @@ def run(config):
     save_file(lora_state_dict, os.path.join(config["lora_output_dir"], "pytorch_lora_weights.safetensors"))
     print("\nTraining completed successfully!")
 
-def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config):
+def train_step(batch, pipeline, noise_scheduler, optimizer, main_proj, accelerator, config, trainable_params):
     """Single training step with improved stability"""
     try:
         # Move batch to GPU and convert to float16
